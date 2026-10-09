@@ -1237,7 +1237,6 @@ export function buildFsRoutes(options: { root?: string; sessionFs?: SessionFsDep
   return [
     registerApiRoute('/web/fs/list', {
       method: 'GET',
-      requiresAuth: false,
       handler: async c => {
         const path = c.req.query('path');
         try {
@@ -1251,7 +1250,6 @@ export function buildFsRoutes(options: { root?: string; sessionFs?: SessionFsDep
     }),
     registerApiRoute('/web/artifacts/list', {
       method: 'GET',
-      requiresAuth: false,
       handler: async c => {
         const path = c.req.query('path');
         if (!path) return c.json({ error: 'Missing required query param: path' }, 400);
@@ -1266,7 +1264,6 @@ export function buildFsRoutes(options: { root?: string; sessionFs?: SessionFsDep
     }),
     registerApiRoute('/web/workspace/rendered/list', {
       method: 'GET',
-      requiresAuth: false,
       handler: async c => {
         const workspacePath = c.req.query('workspacePath');
         const renderedRoot = c.req.query('root');
@@ -1294,7 +1291,6 @@ export function buildFsRoutes(options: { root?: string; sessionFs?: SessionFsDep
     }),
     registerApiRoute('/web/workspace/changes', {
       method: 'GET',
-      requiresAuth: false,
       handler: async c => {
         const workspacePath = c.req.query('workspacePath');
         if (!workspacePath) return c.json({ error: 'Missing required query param: workspacePath' }, 400);
@@ -1328,7 +1324,6 @@ export function buildFsRoutes(options: { root?: string; sessionFs?: SessionFsDep
     }),
     registerApiRoute('/web/workspace/tree', {
       method: 'GET',
-      requiresAuth: false,
       handler: async c => {
         const workspacePath = c.req.query('workspacePath');
         if (!workspacePath) return c.json({ error: 'Missing required query param: workspacePath' }, 400);
@@ -1350,7 +1345,6 @@ export function buildFsRoutes(options: { root?: string; sessionFs?: SessionFsDep
     }),
     registerApiRoute('/web/workspace/file', {
       method: 'GET',
-      requiresAuth: false,
       handler: async c => {
         const workspacePath = c.req.query('workspacePath');
         const path = c.req.query('path');
@@ -1380,7 +1374,6 @@ export function buildFsRoutes(options: { root?: string; sessionFs?: SessionFsDep
     }),
     registerApiRoute('/web/codebase/resolve', {
       method: 'GET',
-      requiresAuth: false,
       handler: async c => {
         const path = c.req.query('path');
         if (!path) return c.json({ error: 'Missing required query param: path' }, 400);
