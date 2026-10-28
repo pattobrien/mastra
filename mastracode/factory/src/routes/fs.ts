@@ -1306,7 +1306,6 @@ export function buildFsRoutes(options: { root?: string; sessionFs?: SessionFsDep
     }),
     registerApiRoute('/web/workspace/changes/patches', {
       method: 'GET',
-      requiresAuth: false,
       handler: async c => {
         const workspacePath = c.req.query('workspacePath');
         const scope = c.req.query('scope') ?? 'branch';
