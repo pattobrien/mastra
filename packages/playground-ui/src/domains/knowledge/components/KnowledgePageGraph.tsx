@@ -117,12 +117,17 @@ function KnowledgePageGraphInner({ pages, edges, pinnedIds = [], selectedPageId,
   }, [pages, allEdges]);
 
   const pinned = useMemo(() => new Set(pinnedIds), [pinnedIds]);
+  // Each circle's size is known from the layout, so hand it to React Flow as the node's fixed size. Left to
+  // React Flow's own DOM measurement, a production Studio sometimes never got one: every node stayed
+  // `visibility: hidden` and the view was never fitted, since both wait for a node's size.
   const nodes = useMemo(
     () =>
       laidOut.nodes.map(node => {
         const center = laidOut.positions.get(node.id) ?? { x: 0, y: 0 };
         return {
           ...node,
+          width: node.data.size,
+          height: node.data.size,
           position: { x: center.x - node.data.size / 2, y: center.y - node.data.size / 2 },
           data: { ...node.data, selected: node.id === selectedPageId, pinned: pinned.has(node.id) },
         };
