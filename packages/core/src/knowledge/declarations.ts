@@ -164,7 +164,9 @@ function parsePattern(key: string, what: string): KnowledgeScopePattern {
     .split(':')
     .map(part => {
       if (!part || part.includes('/') || part.includes('#')) {
-        throw new KnowledgeDeclarationError(`${what} "${key}" has an empty or invalid segment.`);
+        throw new KnowledgeDeclarationError(
+          `${what} "${key}" has an empty or invalid segment; segments can't contain "/" or "#".`,
+        );
       }
       if (part.startsWith('$')) {
         if (!PARAM_PATTERN.test(part))
@@ -176,6 +178,13 @@ function parsePattern(key: string, what: string): KnowledgeScopePattern {
   const params = segments.flatMap(segment => ('param' in segment ? [segment.param] : []));
   if (new Set(params).size !== params.length) {
     throw new KnowledgeDeclarationError(`${what} "${key}" repeats a param.`);
+  }
+  // A pattern's literals match raw run scopes as written, so an escape in one would let a raw scope
+  // pass for a different decoded value. Concrete addresses and principals are canonical: `%` there is an escape.
+  if (params.length > 0 && segments.some(segment => 'literal' in segment && segment.literal.includes('%'))) {
+    throw new KnowledgeDeclarationError(
+      `${what} "${key}" has a literal containing "%"; only params take encoded values.`,
+    );
   }
   return { key, type, segments, params };
 }

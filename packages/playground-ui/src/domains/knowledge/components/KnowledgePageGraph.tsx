@@ -7,11 +7,13 @@ import {
   Position,
   ReactFlow,
   ReactFlowProvider,
+  useNodesInitialized,
   useReactFlow,
+  useStore,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { Pin } from 'lucide-react';
-import { memo, useEffect, useMemo, useRef } from 'react';
+import { memo, useEffect, useMemo } from 'react';
 
 import { runLayout } from '../lib/layout';
 import { pageGraphEdges, toPageFlow } from '../lib/pageGraph';
@@ -24,6 +26,9 @@ import './knowledge.css';
 
 const SCOPE_STYLE = { background: 'var(--card)', borderColor: 'var(--chart-blue)' };
 const PAGE_STYLE = { background: 'var(--card)', borderColor: 'var(--border-strong)' };
+
+/** Circles smaller than this are too small to hold a readable name, so it sits underneath them. */
+const LABEL_INSIDE_MIN_SIZE = 88;
 
 type PageNodeData = PageFlowNode['data'] & { pinned: boolean };
 
@@ -42,15 +47,17 @@ function PageNodeComponent({ data }: NodeProps<PageFlowNode & { data: PageNodeDa
         data-selected={selected || undefined}
         style={page.isScope ? SCOPE_STYLE : PAGE_STYLE}
       >
-        <Txt
-          as="span"
-          variant={size >= 88 ? 'label' : 'meta'}
-          tone="ink"
-          className="pointer-events-none line-clamp-3 max-w-[78%] break-words"
-          title={page.name}
-        >
-          {page.name}
-        </Txt>
+        {size >= LABEL_INSIDE_MIN_SIZE ? (
+          <Txt
+            as="span"
+            variant="label"
+            tone="ink"
+            className="pointer-events-none line-clamp-3 max-w-[78%] break-words"
+            title={page.name}
+          >
+            {page.name}
+          </Txt>
+        ) : null}
       </div>
       {pinned ? (
         <span
@@ -59,6 +66,17 @@ function PageNodeComponent({ data }: NodeProps<PageFlowNode & { data: PageNodeDa
         >
           <Pin className="size-3" aria-hidden />
         </span>
+      ) : null}
+      {size < LABEL_INSIDE_MIN_SIZE ? (
+        <Txt
+          as="span"
+          variant="meta"
+          tone="ink"
+          className="pointer-events-none absolute top-full left-1/2 mt-1 line-clamp-2 w-28 -translate-x-1/2 text-center break-words"
+          title={page.name}
+        >
+          {page.name}
+        </Txt>
       ) : null}
       <Handle type="target" position={Position.Top} className="!invisible" />
       <Handle type="source" position={Position.Bottom} className="!invisible" />
@@ -127,35 +145,19 @@ function KnowledgePageGraphInner({ pages, edges, pinnedIds = [], selectedPageId,
     [laidOut],
   );
 
-  // `fitView` on mount fits whatever box the graph had then: a host that hides it behind a Tree/Graph toggle
-  // gives it zero size, and the nodes end up specks in a corner. So fit again whenever the container gets a
-  // new non-zero size (shown, or the window resized), at most once a frame.
-  const reactFlow = useReactFlow();
-  const containerRef = useRef<HTMLDivElement>(null);
+  // `fitView` on mount fits whatever box and node sizes React Flow had then: a host that hides the graph
+  // behind a Tree/Graph toggle gives it zero size, and on a cold load the nodes may not be measured yet, so
+  // the pages end up specks in a corner or off screen. Fit again whenever React Flow's own measured size
+  // changes to a non-zero box with every node measured. A pan or zoom changes neither, so it is kept.
+  const { fitView } = useReactFlow();
+  const nodesInitialized = useNodesInitialized();
+  const flowWidth = useStore(state => state.width);
+  const flowHeight = useStore(state => state.height);
   const hasNodes = nodes.length > 0;
   useEffect(() => {
-    const container = containerRef.current;
-    if (!container || typeof ResizeObserver === 'undefined') return;
-    let last = { width: container.clientWidth, height: container.clientHeight };
-    let frame: number | undefined;
-    const observer = new ResizeObserver(([entry]) => {
-      if (!entry) return;
-      const { width, height } = entry.contentRect;
-      const changed = width !== last.width || height !== last.height;
-      last = { width, height };
-      if (!changed || width === 0 || height === 0) return;
-      if (frame !== undefined) cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => {
-        frame = undefined;
-        void reactFlow.fitView();
-      });
-    });
-    observer.observe(container);
-    return () => {
-      observer.disconnect();
-      if (frame !== undefined) cancelAnimationFrame(frame);
-    };
-  }, [reactFlow, hasNodes]);
+    if (!hasNodes || !nodesInitialized || flowWidth === 0 || flowHeight === 0) return;
+    void fitView();
+  }, [fitView, hasNodes, nodesInitialized, flowWidth, flowHeight]);
 
   if (!hasNodes) {
     return (
@@ -168,7 +170,7 @@ function KnowledgePageGraphInner({ pages, edges, pinnedIds = [], selectedPageId,
   }
 
   return (
-    <div ref={containerRef} className="size-full" data-testid="knowledge-page-graph">
+    <div className="size-full" data-testid="knowledge-page-graph">
       <ReactFlow
         nodes={nodes}
         edges={flowEdges}
