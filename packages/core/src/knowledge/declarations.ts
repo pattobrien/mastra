@@ -7,6 +7,8 @@
  * @experimental Knowledge APIs are experimental and may change without notice.
  */
 
+import { decodeKnowledgeScopeValue, encodeKnowledgeScopeValue } from './scope-address';
+
 /** @experimental */
 export type KnowledgeRole = 'viewer' | 'contributor' | 'editor' | 'owner';
 
@@ -98,12 +100,6 @@ export interface KnowledgeScopePattern {
   type: string;
   segments: Segment[];
   params: string[];
-  /**
-   * Whether the last segment's value may hold `/`. True for types without template children, so a
-   * Memory id like `user/123` fills `resource:$resourceId`; false where `<address>/<name>` would
-   * read as a child scope.
-   */
-  slashInLast: boolean;
 }
 
 /** How a rule's principal reaches its target scopes. */
@@ -167,7 +163,7 @@ function parsePattern(key: string, what: string): KnowledgeScopePattern {
     .slice(colon + 1)
     .split(':')
     .map(part => {
-      if (!part || part.includes('/')) {
+      if (!part || part.includes('/') || part.includes('#')) {
         throw new KnowledgeDeclarationError(`${what} "${key}" has an empty or invalid segment.`);
       }
       if (part.startsWith('$')) {
@@ -181,15 +177,18 @@ function parsePattern(key: string, what: string): KnowledgeScopePattern {
   if (new Set(params).size !== params.length) {
     throw new KnowledgeDeclarationError(`${what} "${key}" repeats a param.`);
   }
-  return { key, type, segments, params, slashInLast: false };
+  return { key, type, segments, params };
 }
 
-function matchPattern(pattern: KnowledgeScopePattern, address: string): Record<string, string> | null {
+/** Binds raw param values from a canonical address; null when it isn't canonical or doesn't fit. */
+export function matchKnowledgePattern(pattern: KnowledgeScopePattern, address: string): Record<string, string> | null {
+  return matchPattern(pattern, address, false);
+}
+
+function matchPattern(pattern: KnowledgeScopePattern, address: string, raw: boolean): Record<string, string> | null {
   const prefix = `${pattern.type}:`;
   if (!address.startsWith(prefix)) return null;
   const parts = address.slice(prefix.length).split(':');
-  const lastStart = pattern.segments.length - 1;
-  if (parts.some((part, i) => part.includes('/') && (i < lastStart || !pattern.slashInLast))) return null;
   const params: Record<string, string> = {};
   for (let i = 0; i < pattern.segments.length; i++) {
     const segment = pattern.segments[i]!;
@@ -200,24 +199,45 @@ function matchPattern(pattern: KnowledgeScopePattern, address: string): Record<s
       continue;
     }
     const value = last ? parts.slice(i).join(':') : parts[i];
-    if (!value || (last && parts.slice(i).some(part => !part))) return null;
-    params[segment.param] = value;
+    if (!value) return null;
+    const decoded = raw ? value : decodeKnowledgeScopeValue(value, last);
+    if (decoded === null) return null;
+    params[segment.param] = decoded;
   }
   return params;
 }
 
 /**
- * Whether `value` can fill a segment: never empty, and holding `:` or `/` only in the last segment
- * (`/` only where the type has no template children). A value like `a:b` bound into a middle segment
- * would shift every later segment and reach another tenant's scopes.
+ * A canonical address from raw param values. For Knowledge APIs, templates, pins and tools only:
+ * NOT for Agent scopes, which always take raw addresses and treat every percent sign literally.
+ * @experimental
  */
-function fitsSegment(value: string, last: boolean, slashInLast: boolean): boolean {
-  if (value === '') return false;
-  if (!last) return !value.includes(':') && !value.includes('/');
-  return slashInLast || !value.includes('/');
+export function knowledgeScopeAddress(pattern: string, params: Record<string, string>): string {
+  const bound = bindKnowledgePattern(parsePattern(pattern, 'Knowledge scope pattern'), params);
+  if (bound === null)
+    throw new KnowledgeDeclarationError(`Knowledge scope pattern "${pattern}" needs non-empty values for every param.`);
+  return bound;
 }
 
-/** Fills a pattern's params; returns null when one is missing or can't fill its segment. */
+/** Encode raw Agent scopes at Knowledge run startup; never feed the result back into Agent scopes. @internal */
+export function knowledgeRunScopes(compiled: CompiledKnowledgeScopes, scopes: readonly string[]): string[] {
+  return [
+    ...new Set(
+      scopes.map(scope => {
+        for (const declaration of compiled.declarations.values()) {
+          if (declaration.child) continue;
+          const params = matchPattern(declaration.pattern, scope, true);
+          if (params) return bindKnowledgePattern(declaration.pattern, params)!;
+        }
+        throw new KnowledgeDeclarationError(
+          `Knowledge run scope "${scope}" does not match a declared scope type. Declare it in Knowledge \`scopes\` (for Memory's resource:/thread: scopes, spread \`...knowledgeMemoryScopes()\`).`,
+        );
+      }),
+    ),
+  ];
+}
+
+/** Encodes raw param values into a pattern; null when a value is missing or empty. */
 export function bindKnowledgePattern(pattern: KnowledgeScopePattern, params: Record<string, string>): string | null {
   const values: string[] = [];
   for (const [i, segment] of pattern.segments.entries()) {
@@ -226,16 +246,16 @@ export function bindKnowledgePattern(pattern: KnowledgeScopePattern, params: Rec
       continue;
     }
     const value = params[segment.param];
-    if (value === undefined || !fitsSegment(value, i === pattern.segments.length - 1, pattern.slashInLast)) return null;
-    values.push(value);
+    if (value === undefined || value === '') return null;
+    values.push(encodeKnowledgeScopeValue(value, i === pattern.segments.length - 1));
   }
   return `${pattern.type}:${values.join(':')}`;
 }
 
 /**
  * The address prefix a partial binding reaches: segments up to the last bound param, ending at a
- * segment boundary. Only valid for a leading run of bound params. Returns null when a bound value
- * can't fill its segment (a prefix always ends before the last segment, so no `:` is allowed).
+ * segment boundary. Only valid for a leading run of bound params; reserved characters in raw
+ * values (including colons) are encoded so they cannot change tenant or segment boundaries.
  */
 export function knowledgePatternPrefix(pattern: KnowledgeScopePattern, params: Record<string, string>): string | null {
   let prefix = `${pattern.type}:`;
@@ -246,8 +266,8 @@ export function knowledgePatternPrefix(pattern: KnowledgeScopePattern, params: R
     }
     const value = params[segment.param];
     if (value === undefined) break;
-    if (!fitsSegment(value, false, false)) return null;
-    prefix += `${value}:`;
+    if (value === '') return null;
+    prefix += `${encodeKnowledgeScopeValue(value, false)}:`;
   }
   return prefix;
 }
@@ -257,15 +277,27 @@ function sampleAddress(pattern: KnowledgeScopePattern): string {
   return bindKnowledgePattern(pattern, Object.fromEntries(pattern.params.map((param, i) => [param, `p${i}`])))!;
 }
 
+function patternsOverlap(a: KnowledgeScopePattern, b: KnowledgeScopePattern): boolean {
+  if (a.type !== b.type) return false;
+  for (let i = 0; i < Math.min(a.segments.length, b.segments.length); i++) {
+    const left = a.segments[i]!;
+    const right = b.segments[i]!;
+    if ('literal' in left && 'literal' in right && left.literal !== right.literal) return false;
+  }
+  if (a.segments.length === b.segments.length) return true;
+  const shorter = a.segments.length < b.segments.length ? a : b;
+  return 'param' in shorter.segments[shorter.segments.length - 1]!;
+}
+
 /**
- * Compiles and checks declarations: one pattern per type, valid keys, every rule principal of a
+ * Compiles and checks declarations: disjoint patterns per type, valid keys, every rule principal of a
  * declared type with params the target can bind, and every rule reach indexable (an address prefix
  * or a `belongsTo` parent).
  *
  * @experimental
  */
 export function compileKnowledgeScopes(declarations: KnowledgeScopeDeclarations): CompiledKnowledgeScopes {
-  const byType = new Map<string, CompiledKnowledgeDeclaration>();
+  const byType = new Map<string, CompiledKnowledgeDeclaration[]>();
   const all = new Map<string, CompiledKnowledgeDeclaration>();
   const concreteEntries: Array<[string, KnowledgeScopeDeclaration]> = [];
 
@@ -275,38 +307,32 @@ export function compileKnowledgeScopes(declarations: KnowledgeScopeDeclarations)
       concreteEntries.push([key, declaration]);
       continue;
     }
-    const existing = byType.get(pattern.type);
-    if (existing) {
+    const existing = byType.get(pattern.type) ?? [];
+    const overlap = existing.find(candidate => patternsOverlap(candidate.pattern, pattern));
+    if (overlap) {
       throw new KnowledgeDeclarationError(
-        `Knowledge scope type "${pattern.type}" is declared twice ("${existing.key}" and "${key}"); declare one pattern per type.`,
+        `Knowledge scope patterns "${overlap.key}" and "${key}" overlap; patterns of a type must be pairwise disjoint.`,
       );
     }
     const compiled: CompiledKnowledgeDeclaration = { key, pattern, declaration, rules: [], children: [] };
-    byType.set(pattern.type, compiled);
+    byType.set(pattern.type, [...existing, compiled]);
     all.set(key, compiled);
   }
 
   const concrete = new Map<string, { declaration: KnowledgeScopeDeclaration; rules: CompiledKnowledgeRule[] }>();
   for (const [address, declaration] of concreteEntries) {
     const pattern = parsePattern(address, 'Knowledge scope key');
-    const owner = byType.get(pattern.type);
-    if (owner && !matchPattern(owner.pattern, address)) {
+    const owner = byType.get(pattern.type)?.find(candidate => matchKnowledgePattern(candidate.pattern, address));
+    if (!owner) {
       throw new KnowledgeDeclarationError(
-        `Knowledge scope "${address}" doesn't fit its type's pattern "${owner.key}".`,
+        `Knowledge scope "${address}" doesn't match a declared pattern; declare its pattern first.`,
       );
     }
-    if (owner) {
-      const unsupported = (['belongsTo', 'children', 'pages'] as const).filter(
-        field => declaration[field] !== undefined,
+    const unsupported = (['belongsTo', 'children', 'pages'] as const).filter(field => declaration[field] !== undefined);
+    if (unsupported.length) {
+      throw new KnowledgeDeclarationError(
+        `Knowledge scope "${address}" is an address of "${owner.key}" and can only add description, access, pins and pinPriority; declare ${unsupported.join(', ')} on "${owner.key}".`,
       );
-      if (unsupported.length) {
-        throw new KnowledgeDeclarationError(
-          `Knowledge scope "${address}" is an address of "${owner.key}" and can only add description, access, pins and pinPriority; declare ${unsupported.join(', ')} on "${owner.key}".`,
-        );
-      }
-    } else {
-      const compiled: CompiledKnowledgeDeclaration = { key: address, pattern, declaration, rules: [], children: [] };
-      all.set(address, compiled);
     }
     concrete.set(address, { declaration, rules: [] });
   }
@@ -339,13 +365,7 @@ export function compileKnowledgeScopes(declarations: KnowledgeScopeDeclarations)
     }
   }
 
-  const slashInLast = (type: string) => !byType.get(type)?.declaration.children?.length;
-  for (const compiled of byType.values()) compiled.pattern.slashInLast = slashInLast(compiled.pattern.type);
-  const typedPattern = (key: string, what: string) => {
-    const pattern = parsePattern(key, what);
-    pattern.slashInLast = slashInLast(pattern.type);
-    return pattern;
-  };
+  const typedPattern = (key: string, what: string) => parsePattern(key, what);
 
   const compiledScopes: CompiledKnowledgeScopes = {
     declarations: all,
@@ -361,10 +381,9 @@ export function compileKnowledgeScopes(declarations: KnowledgeScopeDeclarations)
       const colon = address.indexOf(':');
       if (colon === -1) return null;
       const extra = concrete.get(address);
-      const typed = byType.get(address.slice(0, colon));
-      if (typed) {
-        const params = matchPattern(typed.pattern, address);
-        if (!params) return null;
+      for (const typed of byType.get(address.slice(0, colon)) ?? []) {
+        const params = matchKnowledgePattern(typed.pattern, address);
+        if (!params) continue;
         return {
           declaration: typed.key,
           compiled: typed,
@@ -373,9 +392,7 @@ export function compileKnowledgeScopes(declarations: KnowledgeScopeDeclarations)
           ...(extra ? { concrete: extra.declaration } : {}),
         };
       }
-      const standalone = all.get(address);
-      if (!standalone) return null;
-      return { declaration: address, compiled: standalone, params: {}, concreteRules: [] };
+      return null;
     },
   };
 

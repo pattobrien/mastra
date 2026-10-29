@@ -90,6 +90,32 @@ export function createKnowledgePageStoreTests(createStore: () => Promise<Knowled
         expect(overview).toMatchObject({ name: 'Overview', isScope: false, scopeId: first.scope.id });
       });
 
+      it('links an unplaced scope once and never replaces its first non-null parent', async () => {
+        const acme = await scope('org:acme', ORG);
+        const globex = await scope('org:globex', ORG);
+        const resource = await scope('resource:u1', RESOURCE);
+        expect(resource.parentId).toBeNull();
+        const linked = await store.materializeScope({
+          address: 'resource:u1',
+          declaration: RESOURCE,
+          name: 'u1',
+          parentId: acme.id,
+          provenance: host,
+        });
+        expect(linked).toMatchObject({ created: false, scope: { id: resource.id, parentId: acme.id } });
+        expect(linked.parentConflict).toBeUndefined();
+        const conflicting = await store.materializeScope({
+          address: 'resource:u1',
+          declaration: RESOURCE,
+          name: 'u1',
+          parentId: globex.id,
+          provenance: host,
+        });
+        expect(conflicting.scope.parentId).toBe(acme.id);
+        expect(conflicting.parentConflict).toEqual({ existingParentId: acme.id, requestedParentId: globex.id });
+        expect((await store.getScopesByAddress(['resource:u1']))[0]!.parentId).toBe(acme.id);
+      });
+
       it('adds template children and keyed pages declared after the scope was created', async () => {
         const account = await scope('account:acme:1', ACCOUNT);
         await store.materializeScope({
@@ -645,6 +671,31 @@ export function createKnowledgePageStoreTests(createStore: () => Promise<Knowled
         expect(await store.searchPages({ query: 'invoice', read: read(['org:acme']), scopeIds: [user.id] })).toEqual(
           [],
         );
+      });
+
+      it('moves merged source history to the target scope, without retaining source-scope visibility', async () => {
+        const acme = await scope('org:acme', ORG);
+        const secret = await scope('org:secret', ORG);
+        const source = await page(acme.id, 'Source');
+        const target = await page(secret.id, 'Target');
+        const sourceRead = read(['org:acme']);
+        const targetRead = read(['org:secret']);
+        expect(
+          (await store.listPageActivity({ read: sourceRead, pageId: source.id })).events.map(e => e.action),
+        ).toEqual(['page-created']);
+        expect((await store.listPageActivity({ read: targetRead, pageId: source.id })).events).toEqual([]);
+
+        await store.mergePages({ sourceId: source.id, sourceVersion: 1, targetId: target.id, provenance: host });
+
+        expect(await store.getPage({ id: source.id, read: 'all' })).toMatchObject({
+          scopeId: secret.id,
+          mergedInto: target.id,
+        });
+        expect(await store.getPage({ id: source.id, read: sourceRead })).toBeNull();
+        expect((await store.listPageActivity({ read: sourceRead, pageId: source.id })).events).toEqual([]);
+        expect(
+          (await store.listPageActivity({ read: targetRead, pageId: source.id })).events.map(e => e.action),
+        ).toEqual(['page-merged', 'page-created']);
       });
 
       it('filters activity by the page and note as they are now', async () => {

@@ -8,6 +8,10 @@ import type {
   ListKnowledgeScopeNodesOutput,
 } from '@internal/core/knowledge-compat';
 import {
+  inspectKnowledgePagesSchema,
+  KNOWLEDGE_PAGES_SCHEMA_VERSION,
+  KNOWLEDGE_RESETTABLE_TABLE_NAMES,
+  TABLE_KNOWLEDGE_PAGES_STATE,
   pageKnowledgeScopeMembers,
   pageKnowledgeScopeNodes,
   parseListKnowledgeScopeMembersInput,
@@ -53,6 +57,7 @@ import {
   knowledgeSemanticIdempotencyKey,
   KnowledgeConflictError,
   KnowledgeNotFoundError,
+  KnowledgeSchemaResetRequiredError,
   KnowledgeStorage,
   parseKnowledgeNodeCursor,
   parseKnowledgeWikilinks,
@@ -68,6 +73,7 @@ import type {
   CreateKnowledgeNodeInput,
   KnowledgeActivityAction,
   KnowledgeActivityEvent,
+  KnowledgePageStore,
   KnowledgeCurationCursor,
   KnowledgeNode,
   KnowledgeRecord,
@@ -94,6 +100,7 @@ import type {
   SqliteTransaction as Transaction,
 } from '../../db/client';
 import { withClientWriteLock } from '../../db/write-lock';
+import { KNOWLEDGE_PAGE_DDL, LibSQLKnowledgePages } from './pages';
 
 const loadKnowledgeV2Core = createKnowledgeV2CoreLoader(coreFeatures, () => import('@mastra/core/storage'));
 
@@ -293,6 +300,7 @@ export function getLibSQLKnowledgeIsolationKey(
 export class KnowledgeLibSQL extends KnowledgeStorage {
   readonly #client: Client;
   readonly #db: LibSQLDB;
+  readonly #pages: LibSQLKnowledgePages;
 
   constructor(config: LibSQLDomainConfig) {
     const client = resolveClient(config);
@@ -303,6 +311,10 @@ export class KnowledgeLibSQL extends KnowledgeStorage {
       client: this.#client,
       maxRetries: config.maxRetries,
       initialBackoffMs: config.initialBackoffMs,
+    });
+    this.#pages = new LibSQLKnowledgePages({
+      read: this.#client,
+      transaction: operation => this.#transaction(operation),
     });
   }
 
@@ -316,203 +328,190 @@ export class KnowledgeLibSQL extends KnowledgeStorage {
     } as const;
   }
 
+  override async dangerouslyClearAll(): Promise<void> {
+    await this.#pages.clearAll();
+  }
+
+  // Schema-4 page store: delegates to LibSQLKnowledgePages.
+  async #inspectPages(tx: Pick<Executor, 'execute'>) {
+    const tables = await tx.execute({
+      sql: "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'mastra\\_knowledge\\_%' ESCAPE '\\'",
+    });
+    const tableNames = tables.rows.map(row => String(row.name));
+    let schemaVersion: number | undefined;
+    if (tableNames.includes(TABLE_KNOWLEDGE_PAGES_STATE)) {
+      const state = await tx.execute({
+        sql: `SELECT schemaVersion FROM "${TABLE_KNOWLEDGE_PAGES_STATE}" WHERE id = 'knowledge'`,
+      });
+      if (state.rows[0]) schemaVersion = Number(state.rows[0].schemaVersion);
+    }
+    return inspectKnowledgePagesSchema({ tableNames, schemaVersion });
+  }
+
   override async inspectSchema() {
-    return this.#inspectSchema(this.#client);
+    return this.#inspectPages(this.#client);
   }
 
-  async #inspectSchema(executor: Executor) {
-    const { inspectKnowledgeSchema } = await loadKnowledgeV2Core();
-    try {
-      const placeholders = KNOWLEDGE_TABLE_NAMES.map(() => '?').join(',');
-      const tables = await executor.execute({
-        sql: `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (${placeholders})`,
-        args: [...KNOWLEDGE_TABLE_NAMES],
-      });
-      const tableNames = tables.rows.map(row => String(row.name));
-      if (tableNames.length === 0) return inspectKnowledgeSchema({ available: true, tableNames });
-
-      const missingTables = KNOWLEDGE_TABLE_NAMES.filter(table => !tableNames.includes(table));
-      if (missingTables.length > 0) {
-        return inspectKnowledgeSchema({
-          available: true,
-          tableNames,
-          reason: `Missing Knowledge v2 tables: ${missingTables.join(', ')}`,
-        });
-      }
-
-      for (const [table, schema] of knowledgeV2TableSchemas) {
-        const columns = await executor.execute(`PRAGMA table_info("${table}")`);
-        const actual = new Set(columns.rows.map(row => String(row.name)));
-        const missing = Object.keys(schema).filter(column => !actual.has(column));
-        if (missing.length > 0) {
-          return inspectKnowledgeSchema({
-            available: true,
-            tableNames,
-            reason: `Knowledge table ${table} is missing v2 columns: ${missing.join(', ')}`,
-          });
-        }
-      }
-      const accessState = await executor.execute(
-        `SELECT schemaVersion FROM "${TABLE_KNOWLEDGE_ACCESS_STATE}" WHERE id='global'`,
-      );
-      if (Number(accessState.rows[0]?.schemaVersion) !== KNOWLEDGE_STORAGE_SCHEMA_VERSION) {
-        return inspectKnowledgeSchema({
-          available: true,
-          tableNames,
-          reason: 'Knowledge schema version marker is missing or incompatible',
-        });
-      }
-      return inspectKnowledgeSchema({
-        available: true,
-        tableNames,
-        schemaVersion: KNOWLEDGE_STORAGE_SCHEMA_VERSION,
-      });
-    } catch (error) {
-      return inspectKnowledgeSchema({
-        available: false,
-        tableNames: [],
-        reason: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
-  async init(): Promise<void> {
-    await this.#transaction(tx => this.#initializeSchema(tx));
-  }
-
-  async #initializeSchema(tx: Executor): Promise<void> {
-    const { assertKnowledgeSchemaCompatible } = await loadKnowledgeV2Core();
-    let inspection = await this.#inspectSchema(tx);
-    if (inspection.status === 'incompatible-reset-required' && (await this.#isPublishedV1Layout(tx))) {
-      // Knowledge v1 was experimental and its data is not migrated: replace the published v1 layout,
-      // discarding any rows it holds.
-      for (const table of [...RETIRED_KNOWLEDGE_TABLE_NAMES, ...[...KNOWLEDGE_TABLE_NAMES].reverse()]) {
-        await tx.execute(`DROP TABLE IF EXISTS "${table}"`);
-      }
-      inspection = await this.#inspectSchema(tx);
-    }
-    assertKnowledgeSchemaCompatible(inspection);
-
-    const createTable = (input: Parameters<LibSQLDB['createTable']>[0]) =>
-      this.#db.createTable({ ...input, executor: tx });
-    await createTable({ tableName: TABLE_KNOWLEDGE_NODES, schema: KNOWLEDGE_V2_NODES_SCHEMA });
-    await createTable({ tableName: TABLE_KNOWLEDGE_RECORDS, schema: KNOWLEDGE_V2_RECORDS_SCHEMA });
-    await createTable({
-      tableName: TABLE_KNOWLEDGE_MENTIONS,
-      schema: KNOWLEDGE_V2_MENTIONS_SCHEMA,
-      compositePrimaryKey: ['recordId', 'sourceId'],
-    });
-    await createTable({
-      tableName: TABLE_KNOWLEDGE_NODE_SCOPES,
-      schema: KNOWLEDGE_NODE_SCOPES_SCHEMA,
-      compositePrimaryKey: ['nodeId', 'scopeNodeId'],
-    });
-    await createTable({
-      tableName: TABLE_KNOWLEDGE_RECORD_SCOPES,
-      schema: KNOWLEDGE_RECORD_SCOPES_SCHEMA,
-      compositePrimaryKey: ['recordId', 'scopeNodeId'],
-    });
-    await createTable({
-      tableName: TABLE_KNOWLEDGE_SCOPE_GRANTS,
-      schema: KNOWLEDGE_SCOPE_GRANTS_SCHEMA,
-      compositePrimaryKey: ['scopeNodeId', 'scopeRefId'],
-    });
-    await createTable({ tableName: TABLE_KNOWLEDGE_ACCESS_STATE, schema: KNOWLEDGE_ACCESS_STATE_SCHEMA });
-    await createTable({ tableName: TABLE_KNOWLEDGE_SCOPE_ADDRESSES, schema: KNOWLEDGE_SCOPE_ADDRESSES_SCHEMA });
-    await createTable({
-      tableName: TABLE_KNOWLEDGE_NODE_ADDRESSES,
-      schema: KNOWLEDGE_NODE_ADDRESSES_SCHEMA,
-      compositePrimaryKey: ['source', 'address'],
-    });
-    await createTable({
-      tableName: TABLE_KNOWLEDGE_IMPORT_STATE,
-      schema: KNOWLEDGE_IMPORT_STATE_SCHEMA,
-      compositePrimaryKey: ['importerId', 'binding', 'key'],
-    });
-    await createTable({ tableName: TABLE_KNOWLEDGE_IMPORT_RUNS, schema: KNOWLEDGE_IMPORT_RUNS_SCHEMA });
-    await createTable({ tableName: TABLE_KNOWLEDGE_PROPOSALS, schema: KNOWLEDGE_PROPOSALS_SCHEMA });
-    await createTable({ tableName: TABLE_KNOWLEDGE_ACTIVITY, schema: KNOWLEDGE_V2_ACTIVITY_SCHEMA });
-    await createTable({ tableName: TABLE_KNOWLEDGE_SEMANTIC_OUTBOX, schema: KNOWLEDGE_SEMANTIC_OUTBOX_SCHEMA });
-    for (const statement of [
-      `CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_nodes_identity ON "${TABLE_KNOWLEDGE_NODES}" (type, scopeKey, canonicalName)`,
-      `CREATE INDEX IF NOT EXISTS idx_knowledge_nodes_scope ON "${TABLE_KNOWLEDGE_NODES}" (scopeKey, type)`,
-      `CREATE INDEX IF NOT EXISTS idx_knowledge_nodes_name ON "${TABLE_KNOWLEDGE_NODES}" (type, canonicalName)`,
-      `CREATE INDEX IF NOT EXISTS idx_knowledge_records_node_latest ON "${TABLE_KNOWLEDGE_RECORDS}" (node, id DESC)`,
-      `CREATE INDEX IF NOT EXISTS idx_knowledge_records_thread_latest ON "${TABLE_KNOWLEDGE_RECORDS}" (sourceThreadId, id DESC)`,
-      `CREATE INDEX IF NOT EXISTS idx_knowledge_mentions_record ON "${TABLE_KNOWLEDGE_MENTIONS}" (recordId, sourceType, sourceId)`,
-      `CREATE INDEX IF NOT EXISTS idx_knowledge_activity_latest ON "${TABLE_KNOWLEDGE_ACTIVITY}" (id DESC)`,
-      `CREATE INDEX IF NOT EXISTS idx_knowledge_records_scope ON "${TABLE_KNOWLEDGE_RECORDS}" (scopeKey, id)`,
-      `CREATE INDEX IF NOT EXISTS idx_knowledge_activity_scope ON "${TABLE_KNOWLEDGE_ACTIVITY}" (scopeKey, id DESC)`,
-      `CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_outbox_idempotency ON "${TABLE_KNOWLEDGE_SEMANTIC_OUTBOX}" (idempotencyKey)`,
-      `CREATE INDEX IF NOT EXISTS idx_knowledge_outbox_claim ON "${TABLE_KNOWLEDGE_SEMANTIC_OUTBOX}" (status, availableAt, createdAt)`,
-      `CREATE INDEX IF NOT EXISTS idx_knowledge_node_scopes_scope ON "${TABLE_KNOWLEDGE_NODE_SCOPES}" (scopeNodeId, nodeId)`,
-      `CREATE INDEX IF NOT EXISTS idx_knowledge_record_scopes_scope ON "${TABLE_KNOWLEDGE_RECORD_SCOPES}" (scopeNodeId, recordId)`,
-      `CREATE INDEX IF NOT EXISTS idx_knowledge_scope_grants_ref ON "${TABLE_KNOWLEDGE_SCOPE_GRANTS}" (scopeRefId, scopeNodeId)`,
-      `CREATE INDEX IF NOT EXISTS idx_knowledge_node_addresses_node ON "${TABLE_KNOWLEDGE_NODE_ADDRESSES}" (nodeId)`,
-      `CREATE INDEX IF NOT EXISTS idx_knowledge_import_runs_lookup ON "${TABLE_KNOWLEDGE_IMPORT_RUNS}" (importerId, binding, queuedAt DESC)`,
-      `CREATE INDEX IF NOT EXISTS idx_knowledge_activity_import_run ON "${TABLE_KNOWLEDGE_ACTIVITY}" (importRunId, id DESC)`,
-    ]) {
-      await tx.execute(statement);
-    }
-    await tx.execute({
-      sql: `INSERT OR IGNORE INTO "${TABLE_KNOWLEDGE_ACCESS_STATE}" (id, epoch, schemaVersion) VALUES ('global', 0, ?)`,
-      args: [KNOWLEDGE_STORAGE_SCHEMA_VERSION],
-    });
-  }
-
-  /**
-   * True when the only Knowledge objects are the tables and indexes published v1 adapters created,
-   * with or without rows. Anything else (v2 tables, unknown tables, views, triggers) needs an
-   * explicit reset.
-   */
-  async #isPublishedV1Layout(executor: Executor): Promise<boolean> {
-    const objects = await executor.execute(
-      "SELECT type, name FROM sqlite_master WHERE name LIKE 'mastra\\_knowledge\\_%' ESCAPE '\\' OR tbl_name LIKE 'mastra\\_knowledge\\_%' ESCAPE '\\' OR sql LIKE '%mastra\\_knowledge\\_%' ESCAPE '\\'",
-    );
-    for (const row of objects.rows) {
-      const type = String(row.type);
-      const name = String(row.name);
-      if (type === 'table' && PUBLISHED_KNOWLEDGE_V1_TABLE_NAMES.has(name)) continue;
-      const knownIndex = PUBLISHED_KNOWLEDGE_V1_INDEX_NAMES.has(name) || name.startsWith('sqlite_autoindex_');
-      if (type !== 'index' || !knownIndex) return false;
-    }
-    return true;
-  }
-
-  async dangerouslyClearAll(): Promise<void> {
+  override async init(): Promise<void> {
     await this.#transaction(async tx => {
-      for (const table of [
-        TABLE_KNOWLEDGE_RECORD_SCOPES,
-        TABLE_KNOWLEDGE_NODE_SCOPES,
-        TABLE_KNOWLEDGE_SCOPE_GRANTS,
-        TABLE_KNOWLEDGE_SCOPE_ADDRESSES,
-        TABLE_KNOWLEDGE_NODE_ADDRESSES,
-        TABLE_KNOWLEDGE_MENTIONS,
-        TABLE_KNOWLEDGE_PROPOSALS,
-        TABLE_KNOWLEDGE_ACTIVITY,
-        TABLE_KNOWLEDGE_IMPORT_STATE,
-        TABLE_KNOWLEDGE_IMPORT_RUNS,
-        TABLE_KNOWLEDGE_SEMANTIC_OUTBOX,
-        TABLE_KNOWLEDGE_RECORDS,
-        TABLE_KNOWLEDGE_NODES,
-      ]) {
-        await tx.execute(`DELETE FROM "${table}"`);
-      }
-      await tx.execute(`UPDATE "${TABLE_KNOWLEDGE_ACCESS_STATE}" SET epoch = 0 WHERE id = 'global'`);
+      const inspection = await this.#inspectPages(tx);
+      if (inspection.status === 'incompatible-reset-required') throw new KnowledgeSchemaResetRequiredError(inspection);
+      for (const statement of KNOWLEDGE_PAGE_DDL) await tx.execute(statement);
+      await tx.execute({
+        sql: `INSERT OR IGNORE INTO "${TABLE_KNOWLEDGE_PAGES_STATE}" (id, schemaVersion) VALUES ('knowledge', ?)`,
+        args: [KNOWLEDGE_PAGES_SCHEMA_VERSION],
+      });
     });
   }
 
   override async dangerouslyReset(): Promise<void> {
     await withClientWriteLock(this.#client, async () => {
       await this.#client.batch(
-        [...RETIRED_KNOWLEDGE_TABLE_NAMES, ...[...KNOWLEDGE_TABLE_NAMES].reverse()].map(table => ({
-          sql: `DROP TABLE IF EXISTS "${table}"`,
-          args: [],
-        })),
+        KNOWLEDGE_RESETTABLE_TABLE_NAMES.map(table => ({ sql: `DROP TABLE IF EXISTS "${table}"`, args: [] })),
         'write',
       );
     });
     await this.init();
+  }
+
+  override materializeScope(
+    input: Parameters<KnowledgePageStore['materializeScope']>[0],
+  ): ReturnType<KnowledgePageStore['materializeScope']> {
+    return this.#pages.materializeScope(input);
+  }
+
+  override getScopesByAddress(
+    input: Parameters<KnowledgePageStore['getScopesByAddress']>[0],
+  ): ReturnType<KnowledgePageStore['getScopesByAddress']> {
+    return this.#pages.getScopesByAddress(input);
+  }
+
+  override listChildScopes(
+    input: Parameters<KnowledgePageStore['listChildScopes']>[0],
+  ): ReturnType<KnowledgePageStore['listChildScopes']> {
+    return this.#pages.listChildScopes(input);
+  }
+
+  override getPage(input: Parameters<KnowledgePageStore['getPage']>[0]): ReturnType<KnowledgePageStore['getPage']> {
+    return this.#pages.getPage(input);
+  }
+
+  override getPageByKey(
+    input: Parameters<KnowledgePageStore['getPageByKey']>[0],
+  ): ReturnType<KnowledgePageStore['getPageByKey']> {
+    return this.#pages.getPageByKey(input);
+  }
+
+  override findPagesByName(
+    input: Parameters<KnowledgePageStore['findPagesByName']>[0],
+  ): ReturnType<KnowledgePageStore['findPagesByName']> {
+    return this.#pages.findPagesByName(input);
+  }
+
+  override listChildPages(
+    input: Parameters<KnowledgePageStore['listChildPages']>[0],
+  ): ReturnType<KnowledgePageStore['listChildPages']> {
+    return this.#pages.listChildPages(input);
+  }
+
+  override listPages(
+    input: Parameters<KnowledgePageStore['listPages']>[0],
+  ): ReturnType<KnowledgePageStore['listPages']> {
+    return this.#pages.listPages(input);
+  }
+
+  override createPage(
+    input: Parameters<KnowledgePageStore['createPage']>[0],
+  ): ReturnType<KnowledgePageStore['createPage']> {
+    return this.#pages.createPage(input);
+  }
+
+  override updatePage(
+    input: Parameters<KnowledgePageStore['updatePage']>[0],
+  ): ReturnType<KnowledgePageStore['updatePage']> {
+    return this.#pages.updatePage(input);
+  }
+
+  override movePage(input: Parameters<KnowledgePageStore['movePage']>[0]): ReturnType<KnowledgePageStore['movePage']> {
+    return this.#pages.movePage(input);
+  }
+
+  override mergePages(
+    input: Parameters<KnowledgePageStore['mergePages']>[0],
+  ): ReturnType<KnowledgePageStore['mergePages']> {
+    return this.#pages.mergePages(input);
+  }
+
+  override deletePage(
+    input: Parameters<KnowledgePageStore['deletePage']>[0],
+  ): ReturnType<KnowledgePageStore['deletePage']> {
+    return this.#pages.deletePage(input);
+  }
+
+  override getNote(input: Parameters<KnowledgePageStore['getNote']>[0]): ReturnType<KnowledgePageStore['getNote']> {
+    return this.#pages.getNote(input);
+  }
+
+  override listNotes(
+    input: Parameters<KnowledgePageStore['listNotes']>[0],
+  ): ReturnType<KnowledgePageStore['listNotes']> {
+    return this.#pages.listNotes(input);
+  }
+
+  override listNotesMentioning(
+    input: Parameters<KnowledgePageStore['listNotesMentioning']>[0],
+  ): ReturnType<KnowledgePageStore['listNotesMentioning']> {
+    return this.#pages.listNotesMentioning(input);
+  }
+
+  override addNote(input: Parameters<KnowledgePageStore['addNote']>[0]): ReturnType<KnowledgePageStore['addNote']> {
+    return this.#pages.addNote(input);
+  }
+
+  override restampNote(
+    input: Parameters<KnowledgePageStore['restampNote']>[0],
+  ): ReturnType<KnowledgePageStore['restampNote']> {
+    return this.#pages.restampNote(input);
+  }
+
+  override removeNote(
+    input: Parameters<KnowledgePageStore['removeNote']>[0],
+  ): ReturnType<KnowledgePageStore['removeNote']> {
+    return this.#pages.removeNote(input);
+  }
+
+  override restoreNote(
+    input: Parameters<KnowledgePageStore['restoreNote']>[0],
+  ): ReturnType<KnowledgePageStore['restoreNote']> {
+    return this.#pages.restoreNote(input);
+  }
+
+  override searchPages(
+    input: Parameters<KnowledgePageStore['searchPages']>[0],
+  ): ReturnType<KnowledgePageStore['searchPages']> {
+    return this.#pages.searchPages(input);
+  }
+
+  override listPageActivity(
+    input: Parameters<KnowledgePageStore['listPageActivity']>[0],
+  ): ReturnType<KnowledgePageStore['listPageActivity']> {
+    return this.#pages.listPageActivity(input);
+  }
+
+  override addPinAudience(
+    input: Parameters<KnowledgePageStore['addPinAudience']>[0],
+  ): ReturnType<KnowledgePageStore['addPinAudience']> {
+    return this.#pages.addPinAudience(input);
+  }
+
+  override removePinAudience(
+    input: Parameters<KnowledgePageStore['removePinAudience']>[0],
+  ): ReturnType<KnowledgePageStore['removePinAudience']> {
+    return this.#pages.removePinAudience(input);
+  }
+
+  override listPins(input: Parameters<KnowledgePageStore['listPins']>[0]): ReturnType<KnowledgePageStore['listPins']> {
+    return this.#pages.listPins(input);
   }
 
   override async reconcileStructure(plan: KnowledgeStructurePlan): Promise<KnowledgeStructureReconcileResult> {
