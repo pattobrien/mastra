@@ -1,5 +1,29 @@
 # @mastra/client-js
 
+## 1.57.1-alpha.2
+
+### Patch Changes
+
+- Exported the saved view and filter types (`SavedViewState`, `FilterNode` and related types) from `@mastra/client-js`. ([#28715](https://github.com/mastra-ai/mastra/pull/28715))
+
+- `getObservabilityCapabilities()` returns the `spanQueryModelFields` flag. When it's `true`, `querySpans()` accepts `model` and `provider` filters, and so does `aggregateSpans()` when `spanAggregate` is also `true`. ([#28859](https://github.com/mastra-ai/mastra/pull/28859))
+
+  ```typescript
+  const { capabilities } = await mastraClient.getObservabilityCapabilities();
+
+  if (capabilities.spanQueryModelFields) {
+    const { spans } = await mastraClient.querySpans({
+      timeRange,
+      where: { op: 'in', value: { path: 'model' }, set: ['gpt-5.6', 'claude-sonnet-5-5'] },
+    });
+  }
+  ```
+
+- Added the dashboard definition types (`DashboardDefinition`, `DashboardWidget`, `DashboardQuery`, and related types) to the exports. ([#28714](https://github.com/mastra-ai/mastra/pull/28714))
+
+- Updated dependencies [[`4c56da4`](https://github.com/mastra-ai/mastra/commit/4c56da456f13d104adfb5bb69ed0937a8c1ba59a), [`fbd5957`](https://github.com/mastra-ai/mastra/commit/fbd5957959481ffc030faa3ab2e3df35e085bc2d), [`69c79cf`](https://github.com/mastra-ai/mastra/commit/69c79cf07b6fc1ffe6f2f547729f1cb05bd54eca), [`c0918c0`](https://github.com/mastra-ai/mastra/commit/c0918c01b337947eeb54d5d1b3ab9ed0719bb4b7), [`e9fc83e`](https://github.com/mastra-ai/mastra/commit/e9fc83e5d4427f49af147aec86eb3f7fcb6fb8ee)]:
+  - @mastra/core@1.81.0-alpha.2
+
 ## 1.57.1-alpha.1
 
 ### Patch Changes

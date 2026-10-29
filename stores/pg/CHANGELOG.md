@@ -1,5 +1,32 @@
 # @mastra/pg
 
+## 1.34.0-alpha.1
+
+### Minor Changes
+
+- Span queries and span aggregates can filter by `model` and `provider`. These filters read only the dedicated `model` and `provider` columns, not span attributes. `@mastra/observability` fills the columns only when a span has both a `model` and a `provider`, and versions before it filled them left them empty, so those spans count as missing: `eq`, `in` and `exists` don't match them, while `ne`, `notIn` and `notExists` do. Results still return `model` and `provider` for them, read from their attributes. ([#28859](https://github.com/mastra-ai/mastra/pull/28859))
+
+  ```typescript
+  const { spans } = await mastraClient.querySpans({
+    timeRange,
+    where: { op: 'eq', left: { path: 'provider' }, right: { literal: 'openai' } },
+  });
+  ```
+
+### Patch Changes
+
+- Trace query `spans.some` and `spans.none` filters on `model` and `provider` now also match the dedicated span columns. Each span reads its `model` or `provider` column first and falls back to the span attributes when the column is empty, so existing filters keep matching spans written before the columns were filled. Field value discovery for `model` and `provider` reads the same values. ([#28859](https://github.com/mastra-ai/mastra/pull/28859))
+
+  ```typescript
+  const { traces } = await mastraClient.queryTraces({
+    timeRange,
+    where: { spans: { some: { op: 'eq', left: { path: 'model' }, right: { literal: 'gpt-5.6' } } } },
+  });
+  ```
+
+- Updated dependencies [[`4c56da4`](https://github.com/mastra-ai/mastra/commit/4c56da456f13d104adfb5bb69ed0937a8c1ba59a), [`fbd5957`](https://github.com/mastra-ai/mastra/commit/fbd5957959481ffc030faa3ab2e3df35e085bc2d), [`69c79cf`](https://github.com/mastra-ai/mastra/commit/69c79cf07b6fc1ffe6f2f547729f1cb05bd54eca), [`c0918c0`](https://github.com/mastra-ai/mastra/commit/c0918c01b337947eeb54d5d1b3ab9ed0719bb4b7), [`e9fc83e`](https://github.com/mastra-ai/mastra/commit/e9fc83e5d4427f49af147aec86eb3f7fcb6fb8ee)]:
+  - @mastra/core@1.81.0-alpha.2
+
 ## 1.34.0-alpha.0
 
 ### Minor Changes

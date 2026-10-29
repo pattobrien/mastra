@@ -1,5 +1,31 @@
 # @mastra/playground-ui
 
+## 66.1.0-alpha.3
+
+### Minor Changes
+
+- Added helpers that turn an observability list page's URL into a saved view and apply a saved view back to the URL (`savedViewFromSearchParams`, `applySavedView`). Parts of a view the page no longer supports, such as a removed filter field or column, are dropped one by one and the rest still applies. The spans and threads pages now keep their time range, filters and sort in the URL, so they survive a reload and can be shared. ([#28715](https://github.com/mastra-ai/mastra/pull/28715))
+
+  ```ts
+  import {
+    applySavedView,
+    savedViewFromSearchParams,
+  } from '@mastra/playground-ui/domains/observability/saved-view-state';
+
+  // Save the current page state as a view.
+  const view = savedViewFromSearchParams('spans', new URLSearchParams(window.location.search));
+
+  // Later, apply it: `params` is the URL to navigate to.
+  const { params } = applySavedView(view, new URLSearchParams(window.location.search));
+  ```
+
+### Patch Changes
+
+- Updated dependencies [[`4c56da4`](https://github.com/mastra-ai/mastra/commit/4c56da456f13d104adfb5bb69ed0937a8c1ba59a), [`4c56da4`](https://github.com/mastra-ai/mastra/commit/4c56da456f13d104adfb5bb69ed0937a8c1ba59a), [`fbd5957`](https://github.com/mastra-ai/mastra/commit/fbd5957959481ffc030faa3ab2e3df35e085bc2d), [`69c79cf`](https://github.com/mastra-ai/mastra/commit/69c79cf07b6fc1ffe6f2f547729f1cb05bd54eca), [`69c79cf`](https://github.com/mastra-ai/mastra/commit/69c79cf07b6fc1ffe6f2f547729f1cb05bd54eca), [`c0918c0`](https://github.com/mastra-ai/mastra/commit/c0918c01b337947eeb54d5d1b3ab9ed0719bb4b7), [`c0918c0`](https://github.com/mastra-ai/mastra/commit/c0918c01b337947eeb54d5d1b3ab9ed0719bb4b7), [`e9fc83e`](https://github.com/mastra-ai/mastra/commit/e9fc83e5d4427f49af147aec86eb3f7fcb6fb8ee)]:
+  - @mastra/core@1.81.0-alpha.2
+  - @mastra/client-js@1.57.1-alpha.2
+  - @mastra/react@1.13.1-alpha.2
+
 ## 66.1.0-alpha.2
 
 ### Patch Changes

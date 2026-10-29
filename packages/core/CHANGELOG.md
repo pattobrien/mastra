@@ -1,5 +1,118 @@
 # @mastra/core
 
+## 1.81.0-alpha.2
+
+### Minor Changes
+
+- Added schemas for saved observability list views. Use `savedViewStateSchema` to validate a saved traces, spans, threads or logs view: its filters, time range, sort, columns and page options. A service that only stores views can use `savedViewStateEnvelopeSchema` instead. It checks the version, the page and the 16 KiB size limit. Dashboards can reuse the filter shape through `filterNodeSchema`. It accepts any operator id, so new operators don't need a schema change. ([#28715](https://github.com/mastra-ai/mastra/pull/28715))
+
+  ```ts
+  import { savedViewStateSchema } from '@mastra/core/storage';
+
+  savedViewStateSchema.parse({
+    schemaVersion: 1,
+    page: 'traces',
+    filters: [{ fieldId: 'status', value: 'error' }],
+    dateRange: { preset: 'last-24h' },
+    sort: { field: 'startedAt', direction: 'desc' },
+  });
+  ```
+
+- Fixed resumed runs losing the link to the run they continue. When you resume an agent, durable agent or workflow run, its span now sets `resumedFromSpanId` to the span id of the first run. This stays true after several resumes and after a durable agent recovers. A resumed run also keeps the external parent span of the run it continues. ([#28849](https://github.com/mastra-ai/mastra/pull/28849))
+
+  A resume that passes only `tracingOptions.parentSpanId` now stays in the original trace under the first run, and uses that id as its external parent. Before, it started a new trace.
+
+  ```ts
+  await agent.resumeGenerate({ approved: true }, { runId, toolCallId, tracingOptions: { parentSpanId: callerSpanId } });
+  // The resumed run stays in the first run's trace.
+  // resumedFromSpanId is the first run's span id, externalParentSpanId is callerSpanId.
+  ```
+
+  The `resumedFromSpanId` option of `getOrCreateSpan` is deprecated. Use `resumeFrom` with the saved tracing context instead.
+
+- Span queries and span aggregates now accept `model` and `provider` filters. Stores opt in with the new `span-query-model-fields` feature. ([#28859](https://github.com/mastra-ai/mastra/pull/28859))
+
+  ```typescript
+  const { spans } = await mastraClient.querySpans({
+    timeRange,
+    where: { op: 'eq', left: { path: 'provider' }, right: { literal: 'anthropic' } },
+  });
+  ```
+
+- Added schemas for custom dashboard definitions. These are schemas only: `@mastra/core` adds no storage methods for dashboards, and no store persists them. ([#28714](https://github.com/mastra-ai/mastra/pull/28714))
+
+  **Layout**
+
+  - A definition lays out rows of widgets on a 12-column grid.
+  - Each widget stores its own trace aggregate, span aggregate, metrics, or scores queries. Queries have no time range; the page supplies it.
+  - A view can set its own `description`, `scope`, and `drilldown`, overriding the widget's. A drilldown has an `action` target and a `click` target.
+
+  **Queries**
+
+  - A query can have an optional `id`. It starts with a letter, uses only letters, digits, `_` and `-`, and is unique within its view. Column ids are also unique within a view.
+  - Set `compare: 'previousWindow'` on any query to compare with the previous window.
+  - A scores query without `scorerId` covers every scorer, with one series per scorer.
+
+  **Filters**
+
+  - `defaults.filters` and drilldown `filters` use the same filter node schema as saved views (`filterNodeSchema`).
+  - Filter groups can nest at most 12 levels deep (`DASHBOARD_MAX_FILTER_DEPTH`).
+  - The page's filters are combined with each query's own. `where` clauses are ANDed. If both set the same metrics or scores filter field, the values must agree (arrays intersect). A contradiction returns no data.
+
+  **Validation**
+
+  - `dashboardDefinitionSchema` validates a whole definition.
+  - `dashboardDefinitionEnvelopeSchema` checks only what a service storing dashboards needs: a known `schemaVersion`, at most 20 widgets, 1 to 8 queries per view, at most 64 KiB serialized, unique widget ids, and `kind` and `views` on every widget. New widget kinds can be stored without upgrading that service.
+
+  **New widget kinds**
+
+  - Widget `kind` accepts any non-empty string. View `options` are passed through for each kind to validate, so new widget kinds need no `@mastra/core` upgrade.
+  - `DASHBOARD_WIDGET_KINDS` lists the built-in kinds: `kpis`, `table`, `timeseries` and `scores`.
+
+  **Versions**
+
+  - Adding an optional field keeps `schemaVersion` the same.
+  - A breaking change bumps `schemaVersion` and adds an upgrade step to `migrateDashboardDefinition`. That function brings any stored version up to the current one before parsing.
+
+  **Browser apps**
+
+  - Import the dashboard schemas from `@mastra/core/storage/dashboards`. It loads no Node built-ins and uses no Node globals such as `process` or `Buffer`.
+  - `@mastra/core/storage` reaches agent code that reads `process` when it loads, so it fails in the browser.
+
+  ```ts
+  import { dashboardDefinitionSchema } from '@mastra/core/storage/dashboards';
+
+  const result = dashboardDefinitionSchema.safeParse({
+    schemaVersion: 1,
+    rows: [
+      {
+        widgets: [
+          {
+            id: 'agents',
+            span: 6,
+            kind: 'table',
+            views: [
+              {
+                queries: [
+                  {
+                    source: 'traceAggregate',
+                    measures: ['count', 'errorRate'],
+                    groupBy: ['rootEntityName'],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  ```
+
+### Patch Changes
+
+- Workspace tools now save their `data-workspace-metadata` chunks to the current response message. Previously, after a task signal rotated the response message id, the chunk was saved under the previous id and replaced that assistant message, losing its reasoning, text, and tool calls from stored history. ([#28853](https://github.com/mastra-ai/mastra/pull/28853))
+
 ## 1.81.0-alpha.1
 
 ### Minor Changes
