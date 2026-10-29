@@ -1,8 +1,17 @@
 import type { NodeProps } from '@xyflow/react';
-import { Background, BackgroundVariant, Controls, Handle, Position, ReactFlow, ReactFlowProvider } from '@xyflow/react';
+import {
+  Background,
+  BackgroundVariant,
+  Controls,
+  Handle,
+  Position,
+  ReactFlow,
+  ReactFlowProvider,
+  useReactFlow,
+} from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { Pin } from 'lucide-react';
-import { memo, useMemo } from 'react';
+import { memo, useEffect, useMemo, useRef } from 'react';
 
 import { runLayout } from '../lib/layout';
 import { pageGraphEdges, toPageFlow } from '../lib/pageGraph';
@@ -118,7 +127,37 @@ function KnowledgePageGraphInner({ pages, edges, pinnedIds = [], selectedPageId,
     [laidOut],
   );
 
-  if (nodes.length === 0) {
+  // `fitView` on mount fits whatever box the graph had then: a host that hides it behind a Tree/Graph toggle
+  // gives it zero size, and the nodes end up specks in a corner. So fit again whenever the container gets a
+  // new non-zero size (shown, or the window resized), at most once a frame.
+  const reactFlow = useReactFlow();
+  const containerRef = useRef<HTMLDivElement>(null);
+  const hasNodes = nodes.length > 0;
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || typeof ResizeObserver === 'undefined') return;
+    let last = { width: container.clientWidth, height: container.clientHeight };
+    let frame: number | undefined;
+    const observer = new ResizeObserver(([entry]) => {
+      if (!entry) return;
+      const { width, height } = entry.contentRect;
+      const changed = width !== last.width || height !== last.height;
+      last = { width, height };
+      if (!changed || width === 0 || height === 0) return;
+      if (frame !== undefined) cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        frame = undefined;
+        void reactFlow.fitView();
+      });
+    });
+    observer.observe(container);
+    return () => {
+      observer.disconnect();
+      if (frame !== undefined) cancelAnimationFrame(frame);
+    };
+  }, [reactFlow, hasNodes]);
+
+  if (!hasNodes) {
     return (
       <div className="flex h-full items-center justify-center p-6">
         <Txt variant="body" tone="muted">
@@ -129,7 +168,7 @@ function KnowledgePageGraphInner({ pages, edges, pinnedIds = [], selectedPageId,
   }
 
   return (
-    <div className="size-full" data-testid="knowledge-page-graph">
+    <div ref={containerRef} className="size-full" data-testid="knowledge-page-graph">
       <ReactFlow
         nodes={nodes}
         edges={flowEdges}
