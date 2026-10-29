@@ -1,15 +1,11 @@
 import type {
   DashboardColumn,
+  DashboardDefinition,
   DashboardDrilldownTarget,
   DashboardQuery,
   DashboardWidget,
   DashboardWidgetView,
 } from '@mastra/client-js';
-
-/**
- * Widgets describing today's Metrics cards, one per card. The request- and DOM-equality tests render
- * each next to its card; they're the seed of `METRICS_DASHBOARD`.
- */
 
 const INPUT = 'mastra_model_total_input_tokens';
 const OUTPUT = 'mastra_model_total_output_tokens';
@@ -42,7 +38,7 @@ const agentRunsTraces: DashboardDrilldownTarget = {
   filters: [{ fieldId: 'rootEntityType', value: 'agent' }],
 };
 
-export const kpisWidget: DashboardWidget = {
+const kpisWidget: DashboardWidget = {
   id: 'kpis',
   span: 12,
   kind: 'kpis',
@@ -122,7 +118,7 @@ export const kpisWidget: DashboardWidget = {
   ],
 };
 
-export const tokenUsageWidget: DashboardWidget = {
+const tokenUsageWidget: DashboardWidget = {
   id: 'token-usage',
   span: 12,
   kind: 'timeseries',
@@ -153,7 +149,9 @@ export const tokenUsageWidget: DashboardWidget = {
     {
       label: 'Cost',
       description: 'Estimated model spend.',
-      queries: [sumSeries('input', INPUT), sumSeries('output', OUTPUT)],
+      // Cache reads aren't charted here, but the card fetches all three for both tabs; asking for them
+      // keeps that answer in use, so going back to Tokens doesn't refetch it.
+      queries: [sumSeries('input', INPUT), sumSeries('output', OUTPUT), sumSeries('cacheRead', CACHE_READ)],
       options: {
         chart: 'stackedBar',
         format: 'usd',
@@ -177,7 +175,7 @@ export const tokenUsageWidget: DashboardWidget = {
   ],
 };
 
-export const agentRunsWidget: DashboardWidget = {
+const agentRunsWidget: DashboardWidget = {
   id: 'agent-runs',
   span: 6,
   kind: 'timeseries',
@@ -203,7 +201,7 @@ export const agentRunsWidget: DashboardWidget = {
   ],
 };
 
-export const failureRateWidget: DashboardWidget = {
+const failureRateWidget: DashboardWidget = {
   id: 'failure-rate',
   span: 6,
   kind: 'timeseries',
@@ -290,7 +288,7 @@ const latencyView = (label: string, metric: string, rootEntityType: string, noun
   },
 });
 
-export const latencyWidget: DashboardWidget = {
+const latencyWidget: DashboardWidget = {
   id: 'latency',
   span: 6,
   kind: 'timeseries',
@@ -312,7 +310,7 @@ const DISTINCT_IDS = [
 ] as const;
 const distinctMeasures = DISTINCT_IDS.map(([measure]) => measure);
 
-export const distinctIdsWidget: DashboardWidget = {
+const distinctIdsWidget: DashboardWidget = {
   id: 'distinct-ids',
   span: 6,
   kind: 'timeseries',
@@ -345,12 +343,14 @@ export const distinctIdsWidget: DashboardWidget = {
   ],
 };
 
-export const scoresWidget: DashboardWidget = {
+const scoresWidget: DashboardWidget = {
   id: 'scores',
   span: 12,
   kind: 'scores',
   title: 'Scores',
   description: 'Average scorer result, 0 to 1.',
+  // Scores need a project, so the org dashboard leaves them out (OBS-725).
+  scope: 'project',
   views: [
     {
       queries: [
@@ -682,7 +682,7 @@ const scopedViews = (scope: 'org' | 'project'): DashboardWidgetView[] => [
   environmentsView(scope),
 ];
 
-export const breakdownWidget: DashboardWidget = {
+const breakdownWidget: DashboardWidget = {
   id: 'breakdown',
   span: 12,
   kind: 'table',
@@ -721,5 +721,27 @@ export const breakdownWidget: DashboardWidget = {
   ],
 };
 
-/** Breakdown's Models tab alone: a table that reads metrics only, so it waits on no capability gate. */
-export const modelsWidget: DashboardWidget = { ...breakdownWidget, id: 'models', views: [modelsView('project')] };
+/** Freezes a value and everything it holds, so a shared definition can't be edited in place. */
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const child of Object.values(value)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+/**
+ * The Metrics page as a dashboard. Org and project pages share it; scope-tagged parts pick per page.
+ * It is frozen: copy it (`structuredClone(METRICS_DASHBOARD)`) before customising.
+ */
+export const METRICS_DASHBOARD: DashboardDefinition = deepFreeze({
+  schemaVersion: 1,
+  rows: [
+    { widgets: [kpisWidget] },
+    { widgets: [breakdownWidget] },
+    { widgets: [tokenUsageWidget] },
+    { widgets: [agentRunsWidget, failureRateWidget] },
+    { widgets: [latencyWidget, distinctIdsWidget] },
+    { widgets: [scoresWidget] },
+  ],
+});

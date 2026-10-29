@@ -19,7 +19,7 @@ import { DashboardRenderer } from '../components/dashboard-renderer';
 import type { DashboardScope } from '../lib/definition';
 import { defineWidgetKind } from '../widget-kind';
 import type { AnyWidgetKind } from '../widget-kind';
-import { agentRunsWidget, distinctIdsWidget, kpisWidget, modelsWidget } from './fixtures/metrics-widgets';
+import { metricsWidget, modelsWidget as models } from './equality-harness';
 import { server } from '@/test/msw-server';
 import { renderWithProviders, TEST_BASE_URL } from '@/test/render';
 
@@ -172,7 +172,7 @@ describe('DashboardRenderer', () => {
           HttpResponse.json({ error: 'boom' }, { status: 500 }),
         ),
       );
-      const { container } = renderDashboard(definition(kpisWidget, agentRunsWidget));
+      const { container } = renderDashboard(definition(metricsWidget('kpis'), metricsWidget('agent-runs')));
       await waitFor(() => expect(within(cell(container, 'kpis')).getAllByText("Couldn't load")).toHaveLength(4));
       expect(await within(cell(container, 'agent-runs')).findByText('runs')).toBeDefined();
     });
@@ -184,7 +184,7 @@ describe('DashboardRenderer', () => {
         if (failing) return HttpResponse.json({ error: 'boom' }, { status: 500 });
         return request.interval ? distinctIdsSeriesFixture(request.timeRange) : distinctIdsTotalsFixture;
       });
-      const { container } = renderDashboard(definition(distinctIdsWidget));
+      const { container } = renderDashboard(definition(metricsWidget('distinct-ids')));
       const widget = cell(container, 'distinct-ids');
       // The client retries an aggregate itself before the widget sees the error.
       expect(await within(widget).findByText(LOAD_ERROR, undefined, { timeout: 5000 })).toBeDefined();
@@ -205,7 +205,7 @@ describe('DashboardRenderer', () => {
           },
         ),
       );
-      const { container } = renderDashboard(definition(modelsWidget));
+      const { container } = renderDashboard(definition(models()));
       const widget = cell(container, 'models');
       expect(await within(widget).findByText(LOAD_ERROR)).toBeDefined();
       failing = false;
@@ -263,7 +263,7 @@ describe('DashboardRenderer', () => {
         traces.push(request);
         return { rows: [], truncated: false };
       });
-      const { container } = renderDashboard(definition(distinctIdsWidget), {
+      const { container } = renderDashboard(definition(metricsWidget('distinct-ids')), {
         filterTokens: [{ fieldId: 'serviceName', value: 'checkout' }],
       });
       expect(
@@ -358,7 +358,9 @@ describe('DashboardRenderer', () => {
           .json()
           .then(b => metrics.push(b));
     });
-    renderDashboard(definition(agentRunsWidget, distinctIdsWidget), { environment: 'production' });
+    renderDashboard(definition(metricsWidget('agent-runs'), metricsWidget('distinct-ids')), {
+      environment: 'production',
+    });
     await waitFor(() => expect(traces.length).toBeGreaterThan(0));
     await waitFor(() => expect(metrics.length).toBeGreaterThan(0));
     server.events.removeAllListeners();
@@ -369,11 +371,11 @@ describe('DashboardRenderer', () => {
   it("sends nothing and shows no data when a widget's filters contradict the page's", async () => {
     const sent: string[] = [];
     server.events.on('request:start', ({ request }) => sent.push(new URL(request.url).pathname));
-    const [view] = agentRunsWidget.views;
+    const [view] = metricsWidget('agent-runs').views;
     const runs = view?.queries[0];
     if (!view || runs?.source !== 'metrics') throw new Error('agent runs reads metrics');
     const staging: DashboardWidget = {
-      ...agentRunsWidget,
+      ...metricsWidget('agent-runs'),
       views: [{ ...view, queries: [{ ...runs, filters: { environment: 'staging' } }] }],
     };
     const { container } = renderDashboard(definition(staging), { environment: 'production' });

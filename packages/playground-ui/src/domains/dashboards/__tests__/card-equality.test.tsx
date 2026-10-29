@@ -46,107 +46,41 @@ import type { MetricsScope } from '../../metrics/hooks/use-metrics';
 import { DashboardRenderer } from '../components/dashboard-renderer';
 import type { DashboardScope, OnDashboardDrilldown } from '../lib/definition';
 import {
-  agentRunsWidget,
-  breakdownWidget,
-  distinctIdsWidget,
-  failureRateWidget,
-  kpisWidget,
-  latencyWidget,
-  scoresWidget,
-  tokenUsageWidget,
-} from './fixtures/metrics-widgets';
+  API,
+  BREAKDOWN_TABS,
+  SCOPES,
+  TEST_NOW,
+  endsNow,
+  expectSame,
+  expectSameTab,
+  find,
+  metricsWidget,
+  normalise,
+  recordRequests,
+  serveBreakdown,
+  settle,
+} from './equality-harness';
+import type { AggregateBody, MetricsBody, Rendered } from './equality-harness';
 import { useFixedChartSize } from '@/test/chart-size';
 import { server } from '@/test/msw-server';
 import { TEST_BASE_URL } from '@/test/render';
 
 /**
- * Each of today's Metrics cards next to the widget describing it: both must send the same requests
+ * Each of today's Metrics cards next to its `METRICS_DASHBOARD` widget: both must send the same requests
  * (bodies and count) and render the same DOM, at project and org scope. These gate #28714.
  */
 
-const SCOPES: Record<'project' | 'org', MetricsScope | undefined> = {
-  project: undefined,
-  org: { projectLabel: (id: string) => `Project ${id}` },
-};
+const kpisWidget = metricsWidget('kpis');
+const tokenUsageWidget = metricsWidget('token-usage');
+const agentRunsWidget = metricsWidget('agent-runs');
+const failureRateWidget = metricsWidget('failure-rate');
+const latencyWidget = metricsWidget('latency');
+const distinctIdsWidget = metricsWidget('distinct-ids');
+const breakdownWidget = metricsWidget('breakdown');
+const scoresWidget = metricsWidget('scores');
 
 /** The dashboard scope matching a test's page: an org page is the one that labels projects. */
 const dashboardScope = (scope: MetricsScope | undefined): DashboardScope => (scope ? 'org' : 'project');
-
-/** Sorts object keys so two bodies with the same fields compare equal. */
-function canonical(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonical);
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value)
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([k, v]) => [k, canonical(v)]),
-    );
-  }
-  return value;
-}
-
-/** Records every request sent while it's on, as `METHOD path?query body`. */
-function recordRequests() {
-  const sent: string[] = [];
-  let inFlight = 0;
-  const onStart = ({ request }: { request: Request }) => {
-    inFlight++;
-    const url = new URL(request.url);
-    const line = `${request.method} ${url.pathname}${url.search}`;
-    if (request.method === 'GET') {
-      sent.push(line);
-      return;
-    }
-    void request
-      .clone()
-      .text()
-      .then(text => sent.push(`${line} ${JSON.stringify(canonical(text ? JSON.parse(text) : null))}`));
-  };
-  const onEnd = () => {
-    inFlight--;
-  };
-  server.events.on('request:start', onStart);
-  server.events.on('response:mocked', onEnd);
-  return {
-    sent,
-    idle: () => inFlight === 0,
-    stop: () => {
-      server.events.removeListener('request:start', onStart);
-      server.events.removeListener('response:mocked', onEnd);
-    },
-  };
-}
-
-/**
- * MIGRATION SCAFFOLD. Comparing `innerHTML` with today's cards pins class names and markup: it proves
- * the widgets reproduce the cards while both exist, and loses its meaning once the cards are deleted.
- * Delete these comparisons with the cards; the behaviour assertions beside them are what stays.
- */
-/** React's `useId` values and Recharts' chart ids differ between two trees; they say nothing about the markup. */
-const normalise = (html: string) => html.replace(/_r_[0-9a-z]+_|:r[0-9a-z]+:|recharts\d+-clip/g, 'ID');
-
-/** Waits until nothing is in flight and the request count has stopped growing. */
-async function settle(recorder: ReturnType<typeof recordRequests>) {
-  let last = -1;
-  await waitFor(
-    async () => {
-      await act(() => new Promise(r => setTimeout(r, 20)));
-      const count = recorder.sent.length;
-      const stable = count === last && recorder.idle();
-      last = count;
-      expect(stable).toBe(true);
-    },
-    { timeout: 3000 },
-  );
-}
-
-type Rendered = { root: HTMLElement; sent: string[] };
-
-function find(container: HTMLElement, selector: string): HTMLElement {
-  const found = container.querySelector<HTMLElement>(selector);
-  if (!found) throw new Error(`Nothing matches ${selector}`);
-  return found;
-}
 
 function rootOf(page: RenderedPage, id: string): Rendered {
   const rendered = page.roots[id];
@@ -224,83 +158,7 @@ async function renderWidgets(widgets: DashboardWidget[], scope: MetricsScope | u
   return { sent: recorder.sent, roots };
 }
 
-/** Same requests (as a multiset) and same markup. */
-function expectSame(card: Rendered, widget: Rendered) {
-  expect(widget.root).not.toBeNull();
-  expect(widget.sent.toSorted()).toEqual(card.sent.toSorted());
-  expect(normalise(widget.root.innerHTML)).toBe(normalise(card.root.innerHTML));
-}
-
-/** Opens a tab in both, then compares the requests that tab sent and the markup it shows. */
-async function expectSameTab(card: Rendered, widget: Rendered, tab: string) {
-  for (const side of [card, widget]) {
-    const recorder = recordRequests();
-    fireEvent.click(within(side.root).getByRole('tab', { name: tab }));
-    await settle(recorder);
-    recorder.stop();
-    side.sent = recorder.sent;
-  }
-  expectSame(card, widget);
-}
-
 const noop = () => {};
-
-const API = `${TEST_BASE_URL}/api/observability`;
-const now = new Date('2026-10-28T12:00:00Z').getTime();
-/** Whether a window ends now (the page's) rather than a window earlier (the previous one). */
-const endsNow = (end: unknown) => Math.abs(now - new Date(String(end)).getTime()) < 3_600_000;
-const noRows: AggregateTracesResponse = { rows: [], truncated: false };
-
-/** The parts of an aggregate request body these handlers route on. */
-type AggregateBody = { groupBy?: string[]; measures?: string[]; where?: unknown; timeRange: { to: string } };
-/** The parts of a metrics request body these handlers route on. */
-type MetricsBody = {
-  name?: string | string[];
-  groupBy?: string[];
-  aggregation?: string;
-  filters?: { timestamp?: { end?: string } };
-};
-
-/**
- * Breakdown's answers, by what a request groups on and which window it covers. Neither card nor
- * widget is told which tab asked: the same body gets the same answer.
- */
-function serveBreakdown() {
-  serveCapabilities(aggregateCapabilities);
-  server.use(
-    http.post<never, AggregateBody>(`${API}/traces/aggregate`, async ({ request }) => {
-      const body = await request.json();
-      const by = (body.groupBy ?? []).join();
-      if (by === 'projectId') return HttpResponse.json(tracesByProject(['p1', 'p2']));
-      if (by.endsWith('environment')) return HttpResponse.json(tracesByEnvironment);
-      if (by === 'resourceId,threadId')
-        return HttpResponse.json(body.measures?.length === 1 ? threadResourcesFixture : tracesByThread);
-      if (by === 'projectId,threadId') return HttpResponse.json(tracesByProjectAndThread);
-      return HttpResponse.json(noRows);
-    }),
-    http.post<never, AggregateBody>(`${API}/spans/aggregate`, async ({ request }) => {
-      const body = await request.json();
-      const current = endsNow(body.timeRange.to);
-      if (JSON.stringify(body.where).includes('tool_call'))
-        return HttpResponse.json(current ? toolCallsByName : noRows);
-      if (!JSON.stringify(body.where).includes('agent_run')) return HttpResponse.json(noRows);
-      if (body.groupBy?.[0] === 'projectId') return HttpResponse.json(agentRunsByProjectAndName);
-      return HttpResponse.json(current ? agentRunsByName : previousWithRetiredAgent);
-    }),
-    http.post<never, MetricsBody>(`${API}/metrics/breakdown`, async ({ request }) => {
-      const body = await request.json();
-      const current = endsNow(body.filters?.timestamp?.end);
-      const by = body.groupBy?.at(-1);
-      if (body.aggregation === 'count')
-        return HttpResponse.json(by === 'model' ? modelSpansByModel : emptyBreakdownFixture);
-      if (by === 'entityName') return HttpResponse.json(current ? agentTokensByName : previousAgentUsage);
-      if (by === 'environment') return HttpResponse.json(tokensByEnvironment);
-      if (by === 'model') return HttpResponse.json(usageByModel);
-      if (by === 'threadId') return HttpResponse.json(usageByThread);
-      return HttpResponse.json(emptyBreakdownFixture);
-    }),
-  );
-}
 
 /** Thirty tools, capped by the server; half were called last window, at other counts. */
 function serveManyTools() {
@@ -335,14 +193,9 @@ async function clickBoth(card: Rendered, widget: Rendered, role: 'button', name:
   expect(normalise(widget.root.innerHTML)).toBe(normalise(card.root.innerHTML));
 }
 
-const BREAKDOWN_TABS = {
-  project: ['Workflows', 'Tools', 'Models', 'Threads', 'Environments', 'Agents'],
-  org: ['Agents', 'Workflows', 'Tools', 'Models', 'Threads', 'Environments', 'Projects'],
-};
-
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['Date'] });
-  vi.setSystemTime(new Date('2026-10-28T12:00:00Z'));
+  vi.setSystemTime(new Date(TEST_NOW));
 });
 
 afterEach(() => {
@@ -578,7 +431,8 @@ describe.each(Object.entries(SCOPES))('cards and their widgets at %s scope', (_n
     });
   });
 
-  describe('Scores', () => {
+  // Scores need a project; the org page leaves them out.
+  describe.runIf(!scope)('Scores', () => {
     it('matches the card', async () => {
       const card = await renderCard(<ScoresCard />, scope);
       expectSame(card, await renderWidget(scoresWidget, scope));
