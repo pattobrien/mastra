@@ -1,15 +1,56 @@
 /**
  * Pure page-graph logic for the schema-4 explorer: parent links plus resolved
- * mentions between loaded pages → React Flow nodes and edges, sized by the
- * same incoming-weighted degree as the record graph.
+ * mentions between loaded pages → React Flow nodes and edges, sized by
+ * incoming-weighted mention degree.
  */
 
 import type { Edge, Node } from '@xyflow/react';
 
 import type { KnowledgePageEdge, KnowledgePagePayload } from '../pageTypes';
-import type { KnowledgeGraphEdge } from '../types';
-import { degreeMap, nodeSize, weightedDegree } from './graphModel';
-import type { NodeDegree } from './graphModel';
+
+export const NODE_SIZE_MIN = 52;
+export const NODE_SIZE_MAX = 176;
+/** Unreferenced pages render as small dots. */
+export const NODE_SIZE_DOT = 26;
+/** Being pointed AT is what importance means: incoming counts double. */
+const INCOMING_WEIGHT = 2;
+
+export interface NodeDegree {
+  incoming: number;
+  outgoing: number;
+}
+
+export function weightedDegree(degree: NodeDegree): number {
+  return INCOMING_WEIGHT * degree.incoming + degree.outgoing;
+}
+
+/**
+ * The most-mentioned page in view anchors NODE_SIZE_MAX and the rest scale with
+ * their weighted degree; pages nothing mentions are fixed-size dots.
+ */
+export function nodeSize(degree: NodeDegree, maxWeighted: number): number {
+  if (degree.incoming < 1) return NODE_SIZE_DOT;
+  if (maxWeighted <= 0) return NODE_SIZE_MIN;
+  const ratio = Math.min(1, weightedDegree(degree) / maxWeighted);
+  return Math.round(NODE_SIZE_MIN + (NODE_SIZE_MAX - NODE_SIZE_MIN) * ratio);
+}
+
+function degreeMap(edges: Array<{ source: string; target: string }>): Map<string, NodeDegree> {
+  const degrees = new Map<string, NodeDegree>();
+  const of = (id: string): NodeDegree => {
+    let entry = degrees.get(id);
+    if (!entry) {
+      entry = { incoming: 0, outgoing: 0 };
+      degrees.set(id, entry);
+    }
+    return entry;
+  };
+  for (const edge of edges) {
+    of(edge.source).outgoing += 1;
+    of(edge.target).incoming += 1;
+  }
+  return degrees;
+}
 
 /**
  * Edges among loaded, live pages: a parent edge for every loaded parent, and
@@ -56,18 +97,7 @@ export function toPageFlow(
   selectedId?: string | null,
 ): { nodes: PageFlowNode[]; edges: PageFlowEdge[] } {
   // Only mentions count toward size: every non-root page has one parent, so parent edges add no signal.
-  const degrees = degreeMap(
-    edges
-      .filter(edge => edge.kind === 'mention')
-      .map(
-        (edge, index): KnowledgeGraphEdge => ({
-          id: String(index),
-          source: edge.source,
-          target: edge.target,
-          type: 'wikilink',
-        }),
-      ),
-  );
+  const degrees = degreeMap(edges.filter(edge => edge.kind === 'mention'));
   let maxWeighted = 0;
   for (const degree of degrees.values()) maxWeighted = Math.max(maxWeighted, weightedDegree(degree));
   const nodes = pages

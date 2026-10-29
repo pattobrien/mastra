@@ -5,13 +5,13 @@ import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Agent } from '@mastra/core/agent';
 import type { MastraDBMessage } from '@mastra/core/agent';
-import { Knowledge } from '@mastra/core/knowledge';
+import { Knowledge, knowledgeMemoryScopes } from '@mastra/core/knowledge';
 import { Mastra } from '@mastra/core/mastra';
 import type { MastraCompositeStore } from '@mastra/core/storage';
 import { LibSQLStore } from '@mastra/libsql';
 import { Memory } from '@mastra/memory';
 import { PostgresStore } from '@mastra/pg';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 type Adapter = 'libsql' | 'pg';
 // CI provides DB_URL for this package, so the PostgreSQL variant runs there alongside LibSQL.
@@ -36,19 +36,6 @@ const publishedKnowledgeV1Fixtures: Record<Adapter, URL> = {
   pg: new URL('../../../../stores/pg/src/storage/domains/knowledge/fixtures/published-1.29.0.sql', import.meta.url),
 };
 
-const structure = {
-  scopes: [
-    { address: 'org:acme', name: 'mastra' },
-    { address: 'features', name: 'features', parentAddresses: ['org:acme'] },
-    { address: 'features:memory', name: 'memory', parentAddresses: ['features'] },
-    { address: 'features:memory:subconscious', name: 'subconscious', parentAddresses: ['features:memory'] },
-    { address: 'repo:mastra', name: 'repo:mastra', parentAddresses: ['org:acme'] },
-    { address: 'repo:mastra:issues', name: 'issues', parentAddresses: ['repo:mastra'] },
-    { address: 'repo:mastra:prs', name: 'prs', parentAddresses: ['repo:mastra'] },
-    { address: 'resource:workspace', name: 'Workspace', parentAddresses: ['org:acme'] },
-  ],
-};
-
 function message(threadId: string): MastraDBMessage {
   return {
     id: randomUUID(),
@@ -60,69 +47,87 @@ function message(threadId: string): MastraDBMessage {
   };
 }
 
-function deterministicObservationModel(curate = false) {
-  let wrote = false;
-  const doStream = vi.fn(async () => ({
-    stream: new ReadableStream({
-      start(controller) {
-        if (curate && !wrote) {
-          wrote = true;
-          controller.enqueue({
-            type: 'tool-call',
-            toolCallId: 'wave-1-create',
-            toolName: 'knowledge_record',
-            input: JSON.stringify({
-              op: 'add',
-              node: 'Atlas refund launch',
-              kind: 'feature',
-              text: '[[Maya Chen]] owns the [[Atlas refund launch]].',
-              scope: ['org:acme', 'resource:workspace'],
-            }),
-          });
-          controller.enqueue({
-            type: 'finish',
-            finishReason: 'tool-calls',
-            usage: { inputTokens: 20, outputTokens: 8 },
-          });
+type Step = { toolName: string; input: Record<string, unknown> } | { text: string };
+
+/** A streaming model that plays `steps` in order, one per model call, and records every prompt it sees. */
+function scriptedModel(steps: Step[]) {
+  const prompts: unknown[] = [];
+  let next = 0;
+  const doStream = async ({ prompt }: { prompt: unknown }) => {
+    prompts.push(prompt);
+    const step = steps[next++] ?? { text: 'Done.' };
+    const usage = { inputTokens: 20, outputTokens: 8, totalTokens: 28 };
+    const chunks =
+      'text' in step
+        ? [
+            { type: 'stream-start', warnings: [] },
+            { type: 'text-start', id: `text-${next}` },
+            { type: 'text-delta', id: `text-${next}`, delta: step.text },
+            { type: 'text-end', id: `text-${next}` },
+            { type: 'finish', finishReason: 'stop', usage },
+          ]
+        : [
+            { type: 'stream-start', warnings: [] },
+            {
+              type: 'tool-call',
+              toolCallId: `call-${next}`,
+              toolName: step.toolName,
+              input: JSON.stringify(step.input),
+            },
+            { type: 'finish', finishReason: 'tool-calls', usage },
+          ];
+    return {
+      stream: new ReadableStream({
+        start(controller) {
+          for (const chunk of chunks) controller.enqueue(chunk);
           controller.close();
-          return;
-        }
-        for (const chunk of [
-          { type: 'stream-start', warnings: [] },
-          { type: 'response-metadata', id: 'wave-1-observation', modelId: 'aimock', timestamp: new Date() },
-          { type: 'text-start', id: 'wave-1-text' },
-          {
-            type: 'text-delta',
-            id: 'wave-1-text',
-            delta: '<observations>\nMaya Chen owns the Atlas refund launch.\n</observations>',
-          },
-          { type: 'text-end', id: 'wave-1-text' },
-          { type: 'finish', finishReason: 'stop', usage: { inputTokens: 20, outputTokens: 8, totalTokens: 28 } },
-        ]) {
-          controller.enqueue(chunk);
-        }
-        controller.close();
-      },
-    }),
-    rawCall: { rawPrompt: null, rawSettings: {} },
-    warnings: [],
-  }));
-  const doGenerate = vi.fn(async () => {
-    throw new Error('Wave 1 proof curates through a streaming agent turn.');
-  });
+        },
+      }),
+      rawCall: { rawPrompt: null, rawSettings: {} },
+      warnings: [],
+    };
+  };
   return {
+    prompts,
     model: {
       specificationVersion: 'v2' as const,
       provider: 'aimock',
-      modelId: 'deterministic-wave-1',
+      modelId: 'scripted-knowledge',
       supportedUrls: {},
       doStream,
-      doGenerate,
+      doGenerate: async () => {
+        throw new Error('This proof runs streaming agent turns only.');
+      },
     },
-    doGenerate,
-    doStream,
   };
 }
+
+const curation: Step[] = [
+  {
+    toolName: 'knowledge_page',
+    input: {
+      op: 'write',
+      scope: 'resource:workspace',
+      key: 'atlas',
+      name: 'Atlas refund launch',
+      body: 'Atlas is the refund launch for Q4.',
+    },
+  },
+  {
+    toolName: 'knowledge_note',
+    input: {
+      op: 'add',
+      page: 'resource:workspace#atlas',
+      scope: ['resource:workspace'],
+      text: '[[Maya Chen]] owns the [[Atlas refund launch]].',
+    },
+  },
+  {
+    toolName: 'knowledge_pin',
+    input: { op: 'pin', page: 'resource:workspace#atlas', audience: ['resource:workspace'] },
+  },
+  { text: 'Recorded.' },
+];
 
 async function createStorage(
   id: string,
@@ -140,7 +145,7 @@ async function createStorage(
     return { storage, location: schemaName };
   }
 
-  const directory = await mkdtemp(join(tmpdir(), 'knowledge-v2-wave-1-'));
+  const directory = await mkdtemp(join(tmpdir(), 'knowledge-pages-'));
   temporaryDirectories.push(directory);
   const location = join(directory, 'knowledge.db');
   const storage = new LibSQLStore({ id, url: `file:${location}` });
@@ -148,19 +153,20 @@ async function createStorage(
   return { storage, location };
 }
 
-function createRuntime(storage: MastraCompositeStore) {
+function createRuntime(storage: MastraCompositeStore, steps: Step[]) {
   const knowledge = new Knowledge({
     id: 'mastra',
     name: 'Mastra Knowledge',
     description: 'Product architecture, repository work, and operational knowledge for Mastra.',
     storage,
-    structure,
+    scopes: knowledgeMemoryScopes(),
     tools: true,
+    pinnedContext: true,
   });
-  const curator = deterministicObservationModel(true);
+  const curator = scriptedModel(steps);
   const memory = new Memory({ storage });
   memories.push(memory);
-  // Knowledge attaches to the agent: the run's scope is its `scopes` plus its Memory resource and thread.
+  // The run holds its agent `scopes` plus its Memory resource and thread.
   const agent = new Agent({
     id: 'curator',
     name: 'Curator',
@@ -177,6 +183,17 @@ function createRuntime(storage: MastraCompositeStore) {
     logger: false,
   });
   return { knowledge: mastra.getKnowledge('mastra'), memory, agent: mastra.getAgent('curator'), curator };
+}
+
+/** Reads the Atlas page, its notes and its pins the way a run holding `org:acme` and `resource:workspace` sees them. */
+async function readAtlas(knowledge: Knowledge) {
+  const store = await knowledge.getStorage();
+  const read = await knowledge.readScopeFor(['org:acme', 'resource:workspace']);
+  const [scope] = await store.getScopesByAddress(['resource:workspace']);
+  const page = scope ? await store.getPageByKey({ scopeId: scope.id, key: 'atlas', read }) : null;
+  const notes = page ? (await store.listNotes({ pageId: page.id, read })).notes : [];
+  const pins = (await store.listPins({ audience: ['resource:workspace'], read })).pins;
+  return { scope, page, notes, pins };
 }
 
 /**
@@ -309,59 +326,40 @@ afterEach(async () => {
   if (cleanupErrors.length) throw cleanupErrors[0];
 });
 
-describe.each(adapters)('Knowledge v2 Wave 1 linked-workspace proof (%s)', adapter => {
-  it('reconciles, curates through an agent with Knowledge tools, and survives a fresh runtime restart', async () => {
+describe.each(adapters)('Knowledge pages on a real store, curated by an agent (%s)', adapter => {
+  it('writes a page, a note and a pin through agent tools, and a restarted runtime reads and delivers them', async () => {
     const resolvedPackages = {
       core: import.meta.resolve('@mastra/core/knowledge'),
       memory: import.meta.resolve('@mastra/memory'),
       adapter: import.meta.resolve(adapter === 'pg' ? '@mastra/pg' : '@mastra/libsql'),
     };
+    // The proof runs against this worktree's builds, not a published package.
     expect(resolvedPackages.core).toContain('/packages/core/dist/knowledge/');
     expect(resolvedPackages.memory).toContain('/packages/memory/dist/');
     expect(resolvedPackages.adapter).toContain(adapter === 'pg' ? '/stores/pg/dist/' : '/stores/libsql/dist/');
-
-    const { storage, location } = await createStorage(`wave-1-${adapter}`, adapter);
-    const first = createRuntime(storage);
-    const reconciled = await first.knowledge.reconcile();
-    expect(Object.keys(reconciled.scopes)).toEqual(
-      expect.arrayContaining(structure.scopes.map(scope => scope.address)),
-    );
-
+    const { storage, location } = await createStorage(`knowledge-${adapter}`, adapter);
+    const first = createRuntime(storage, curation);
     const threadId = `proof-${randomUUID()}`;
-    await first.memory.createThread({ threadId, resourceId: 'workspace', title: 'Wave 1 proof' });
+    await first.memory.createThread({ threadId, resourceId: 'workspace', title: 'Knowledge proof' });
     await (
       await first.agent.stream('Maya Chen owns the Atlas refund launch.', {
         memory: { thread: threadId, resource: 'workspace' },
       })
     ).consumeStream();
-    const visibleScope = ['org:acme', 'resource:workspace'];
     await first.memory.settled();
-    expect(await first.knowledge.resolveNode({ name: 'Atlas refund launch', scope: visibleScope })).toMatchObject({
-      kind: 'feature',
-      scope: ['org:acme', 'resource:workspace'],
-    });
-    expect(first.curator.doGenerate).not.toHaveBeenCalled();
-    expect(first.curator.doStream).toHaveBeenCalled();
-    const captured = await first.knowledge.resolveNode({ name: 'Atlas refund launch', scope: visibleScope });
-    const records = await first.knowledge.listKnowledgeAbout({ node: captured!.id, scope: visibleScope });
-    expect(records.records).toHaveLength(1);
-    expect(records.records[0]).toMatchObject({
+
+    const written = await readAtlas(first.knowledge);
+    expect(written.page).toMatchObject({ name: 'Atlas refund launch', body: 'Atlas is the refund launch for Q4.' });
+    expect(written.notes).toHaveLength(1);
+    expect(written.notes[0]).toMatchObject({
       text: '[[Maya Chen]] owns the [[Atlas refund launch]].',
-      sourceThreadId: threadId,
-      scope: ['org:acme', 'resource:workspace'],
+      stampScopeIds: [written.scope!.id],
     });
-    expect(records.records[0]?.capturedAt).toBeInstanceOf(Date);
-    expect(await first.knowledge.listActivity({ scope: visibleScope, limit: 100 })).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ action: 'node-created', recordId: captured!.id, scope: visibleScope }),
-        expect.objectContaining({
-          action: 'record-created',
-          recordId: records.records[0]!.id,
-          sourceThreadId: threadId,
-          scope: visibleScope,
-        }),
-      ]),
-    );
+    expect(written.pins.map(pin => pin.pageId)).toEqual([written.page!.id]);
+    // A run that holds only another resource sees none of it.
+    const store = await first.knowledge.getStorage();
+    const outsider = await first.knowledge.readScopeFor(['org:acme', 'resource:someone-else']);
+    expect(await store.getPage({ id: written.page!.id, read: outsider })).toBeNull();
 
     await first.memory.settled();
     memories.splice(memories.indexOf(first.memory), 1);
@@ -371,39 +369,45 @@ describe.each(adapters)('Knowledge v2 Wave 1 linked-workspace proof (%s)', adapt
     const restartedStorage =
       adapter === 'pg'
         ? new PostgresStore({
-            id: `wave-1-${adapter}-restart`,
+            id: `knowledge-${adapter}-restart`,
             connectionString: postgresConnectionString,
             schemaName: location,
           })
-        : new LibSQLStore({ id: `wave-1-${adapter}-restart`, url: `file:${location}` });
+        : new LibSQLStore({ id: `knowledge-${adapter}-restart`, url: `file:${location}` });
     stores.push(restartedStorage);
-    const restarted = createRuntime(restartedStorage);
-    const replay = await restarted.knowledge.reconcile();
-    expect(replay.createdScopeIds).toEqual([]);
-    const persisted = await restarted.knowledge.resolveNode({ name: 'Atlas refund launch', scope: visibleScope });
-    expect(persisted?.id).toBe(captured?.id);
-    expect(
-      (await restarted.knowledge.listKnowledgeAbout({ node: persisted!.id, scope: visibleScope })).records,
-    ).toHaveLength(1);
+    const restarted = createRuntime(restartedStorage, [{ text: 'Noted.' }]);
+    const persisted = await readAtlas(restarted.knowledge);
+    expect(persisted.page?.id).toBe(written.page?.id);
+    expect(persisted.notes.map(note => note.id)).toEqual(written.notes.map(note => note.id));
+    expect(persisted.pins.map(pin => pin.pageId)).toEqual([written.page!.id]);
+
+    // The pinned page reaches the next turn of a fresh runtime without the agent asking for it.
+    const nextThread = `next-${randomUUID()}`;
+    await restarted.memory.createThread({ threadId: nextThread, resourceId: 'workspace', title: 'Next turn' });
+    await (
+      await restarted.agent.stream('What is Atlas?', { memory: { thread: nextThread, resource: 'workspace' } })
+    ).consumeStream();
+    expect(JSON.stringify(restarted.curator.prompts[0])).toContain('Atlas is the refund launch for Q4.');
 
     await writeProofOutput({
       adapter,
       resolvedPackages: Object.fromEntries(
         Object.entries(resolvedPackages).map(([name, url]) => [name, sanitizePackageUrl(url)]),
       ),
-      structureScopeCount: Object.keys(reconciled.scopes).length,
-      curation: { node: captured?.name, records: records.records.length, activity: 'present' },
-      restart: { sameNodeId: persisted?.id === captured?.id, duplicateScopes: replay.createdScopeIds.length },
+      page: persisted.page?.name,
+      notes: persisted.notes.length,
+      pins: persisted.pins.length,
+      restart: { samePageId: persisted.page?.id === written.page?.id },
     });
   });
 
   it.skipIf(adapter !== 'libsql')(
-    'detects incompatibility without mutation and resets only disposable Knowledge data',
+    'detects an incompatible Knowledge schema without mutation and resets only Knowledge data',
     async () => {
-      const directory = await mkdtemp(join(tmpdir(), 'knowledge-v2-wave-1-reset-'));
+      const directory = await mkdtemp(join(tmpdir(), 'knowledge-pages-reset-'));
       temporaryDirectories.push(directory);
       const databasePath = join(directory, 'reset.db');
-      const initialStorage = new LibSQLStore({ id: 'wave-1-reset-seed', url: `file:${databasePath}` });
+      const initialStorage = new LibSQLStore({ id: 'knowledge-reset-seed', url: `file:${databasePath}` });
       stores.push(initialStorage);
       const initialMemory = new Memory({ storage: initialStorage });
       await initialMemory.createThread({ threadId: 'preserved-thread', resourceId: 'proof', title: 'Preserved' });
@@ -411,43 +415,51 @@ describe.each(adapters)('Knowledge v2 Wave 1 linked-workspace proof (%s)', adapt
       await initialStorage.close();
       stores.splice(stores.indexOf(initialStorage), 1);
 
+      // A schema-2 table beside the schema-4 ones makes the store need a reset.
       const database = new DatabaseSync(databasePath);
-      database.exec('DROP TABLE mastra_knowledge_proposals');
+      database.exec('CREATE TABLE mastra_knowledge_nodes (id TEXT PRIMARY KEY)');
       database.close();
 
-      const storage = new LibSQLStore({ id: 'wave-1-reset', url: `file:${databasePath}` });
+      const storage = new LibSQLStore({ id: 'knowledge-reset', url: `file:${databasePath}` });
       stores.push(storage);
       const domain = storage.stores.knowledge!;
+      // Inspecting twice proves inspection itself changes nothing.
+      expect(await domain.inspectSchema()).toMatchObject({ status: 'incompatible-reset-required' });
       expect(await domain.inspectSchema()).toMatchObject({ status: 'incompatible-reset-required' });
 
       if (!databasePath.startsWith(tmpdir()))
         throw new Error(`Refusing to reset non-temporary database ${databasePath}`);
       await domain.dangerouslyReset();
-      expect(await domain.inspectSchema()).toEqual({ status: 'compatible', schemaVersion: 2 });
+      expect(await domain.inspectSchema()).toEqual({ status: 'compatible', schemaVersion: 4 });
       expect(await new Memory({ storage }).getThreadById({ threadId: 'preserved-thread' })).toMatchObject({
         title: 'Preserved',
       });
     },
   );
 
-  it('upgrades a database written by the published v1 Knowledge release', async () => {
-    const { storage, location } = await createStorage('wave-1-upgrade', adapter);
+  it('keeps a published v1 Knowledge database untouched until an explicit reset, while Memory keeps working', async () => {
+    const { storage, location } = await createStorage('knowledge-upgrade', adapter);
     const { countV1Nodes, hasTable } = await seedPublishedKnowledgeV1(adapter, storage, location);
 
-    // Ordinary memory keeps working on the upgraded database while Knowledge is unused.
     const plainMemory = new Memory({ storage });
     new Mastra({ memory: { default: plainMemory }, logger: false });
     await plainMemory.createThread({ threadId: 'kept-thread', resourceId: 'workspace', title: 'Kept' });
     await plainMemory.saveMessages({ messages: [message('kept-thread')] });
-
     expect(await countV1Nodes()).toBe(1);
 
-    // Knowledge v1 data is not migrated: turning Knowledge on replaces the published v1 tables, rows included.
-    const upgraded = createRuntime(storage);
-    await upgraded.knowledge.reconcile();
-    expect(await storage.stores!.knowledge!.getNode('v1-node')).toBeNull();
-    // Replacement removes the retired v1 cursor table from this store's own schema.
-    if (hasTable) expect(await hasTable('mastra_knowledge_cursors')).toBe(false);
+    // Knowledge v1 data is never migrated: the store reports a reset and leaves the rows alone.
+    const domain = storage.stores!.knowledge!;
+    expect(await domain.inspectSchema()).toMatchObject({ status: 'incompatible-reset-required' });
+    expect(await countV1Nodes()).toBe(1);
+
+    await domain.dangerouslyReset();
+    expect(await domain.inspectSchema()).toEqual({ status: 'compatible', schemaVersion: 4 });
+    if (hasTable) {
+      expect(await hasTable('mastra_knowledge_nodes')).toBe(false);
+      expect(await hasTable('mastra_knowledge_cursors')).toBe(false);
+    }
+
+    const upgraded = createRuntime(storage, curation);
     const threadId = `upgrade-${randomUUID()}`;
     await upgraded.memory.createThread({ threadId, resourceId: 'workspace', title: 'After upgrade' });
     await (
@@ -456,9 +468,7 @@ describe.each(adapters)('Knowledge v2 Wave 1 linked-workspace proof (%s)', adapt
       })
     ).consumeStream();
     await upgraded.memory.settled();
-    expect(
-      await upgraded.knowledge.resolveNode({ name: 'Atlas refund launch', scope: ['org:acme', 'resource:workspace'] }),
-    ).toMatchObject({ kind: 'feature' });
+    expect((await readAtlas(upgraded.knowledge)).notes).toHaveLength(1);
     expect(await upgraded.memory.getThreadById({ threadId: 'kept-thread' })).toMatchObject({ title: 'Kept' });
   });
 });

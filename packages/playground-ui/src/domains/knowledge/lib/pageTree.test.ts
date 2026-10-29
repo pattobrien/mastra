@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { KnowledgePagePayload } from '../pageTypes';
-import { NODE_SIZE_DOT, NODE_SIZE_MAX } from './graphModel';
-import { pageGraphEdges, toPageFlow } from './pageGraph';
+import { NODE_SIZE_DOT, NODE_SIZE_MAX, pageGraphEdges, toPageFlow } from './pageGraph';
 import { buildPageTree, comparePagePosition, pageAncestorIds, visiblePageRows } from './pageTree';
 
 function page(id: string, parentId: string | null, position: string, extra: Partial<KnowledgePagePayload> = {}) {
