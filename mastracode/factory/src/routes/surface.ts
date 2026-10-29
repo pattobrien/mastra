@@ -54,12 +54,12 @@ import {
   workItemBranchSource,
   workItemThreadTitle,
 } from '../work-item-branch.js';
-import { KnowledgeRoutes } from './knowledge.js';
 import { buildAutomationRunRoutes } from './automation-runs.js';
 import { ConfigRoutes } from './config.js';
 import { invalidateCustomProvidersSnapshots } from './custom-provider-source.js';
 import { buildFsRoutes } from './fs.js';
 import { IntakeRoutes } from './intake.js';
+import { KnowledgeRoutes } from './knowledge.js';
 import { OAuthRoutes } from './oauth.js';
 import type { RouteAuth } from './route.js';
 import { SkillRoutes } from './skills.js';
