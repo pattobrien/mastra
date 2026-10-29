@@ -112,7 +112,7 @@ describe('KnowledgePageGraph labels', () => {
   it('puts a small page’s name under its circle, unclipped', async () => {
     renderWithProviders(<KnowledgePageGraph pages={pages} edges={[]} onSelect={() => {}} />);
     const nodes = await screen.findAllByTestId('knowledge-page-node');
-    const small = nodes.filter(node => Number.parseFloat((node as HTMLElement).style.width) < 88);
+    const small = nodes.filter(node => Number.parseFloat(node.style.width) < 88);
     expect(small.length).toBeGreaterThan(0);
     for (const node of small) {
       const name = node.getAttribute('data-page-id') ?? '';
