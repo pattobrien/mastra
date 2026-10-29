@@ -1,16 +1,17 @@
 import { createKnowledgePageStoreTests } from '@internal/storage-test-utils';
 import { Pool } from 'pg';
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { PoolAdapter } from '../../client';
 import type { DbClient } from '../../db';
 import { PostgresStore } from '../../index';
+import { connectionString as defaultConnectionString } from '../../test-utils';
 
 import { getPgKnowledgeIsolationKey, KnowledgePG } from '.';
 
 vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
 
-const connectionString = process.env.KNOWLEDGE_PG_URL ?? 'postgresql://postgres:postgres@localhost:5444/mastra';
+const connectionString = process.env.KNOWLEDGE_PG_URL ?? defaultConnectionString;
 const pool = new Pool({ connectionString });
 afterAll(async () => {
   await pool.end();
@@ -96,6 +97,10 @@ describe('KnowledgePG storage isolation', () => {
       new KnowledgePG({ client: new PoolAdapter(pool), schemaName: 'shared' }).getStorageIsolationKey(),
     );
   });
+});
+
+beforeAll(async () => {
+  await pool.query('CREATE SCHEMA IF NOT EXISTS knowledge_contract_test');
 });
 
 createKnowledgePageStoreTests(() => new KnowledgePG({ pool, schemaName: 'knowledge_contract_test' }));

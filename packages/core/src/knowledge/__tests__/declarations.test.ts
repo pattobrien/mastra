@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { knowledgeRoleOn } from '../access';
 import {
   bindKnowledgePattern,
   compileKnowledgeScopes,
@@ -147,6 +148,29 @@ describe('binding params into patterns', () => {
 });
 
 describe('compileKnowledgeScopes: validation', () => {
+  it('refuses reserved characters in literal segments, so a raw run scope cannot spell an encoded value', () => {
+    for (const key of ['lit:a%2Fb:$p', 'lit:a/b:$p', 'lit:a#b:$p']) {
+      expect(() => compileKnowledgeScopes({ [key]: {} }), key).toThrow(KnowledgeDeclarationError);
+    }
+    expect(() => compileKnowledgeScopes({ 'lit:ab:$p': {} })).not.toThrow();
+  });
+
+  it('accepts canonical escapes in concrete addresses and principals, and binds raw run scopes to them', () => {
+    const compiled = compileKnowledgeScopes({
+      ...knowledgeMemoryScopes(),
+      'resource:user%2F1': { access: [{ principal: 'org:a%2Fb', role: 'viewer' }] },
+      'project:$projectId': {},
+      'project:p1': { access: [{ principal: 'resource:user%2F1', role: 'editor' }] },
+    });
+    const held = knowledgeRunScopes(compiled, ['resource:user/1']);
+    expect(held).toEqual(['resource:user%2F1']);
+    expect(knowledgeRoleOn(compiled, held, { address: 'project:p1' })).toBe('editor');
+    expect(knowledgeRoleOn(compiled, knowledgeRunScopes(compiled, ['org:a/b']), { address: 'resource:user%2F1' })).toBe(
+      'viewer',
+    );
+    expect(knowledgeRoleOn(compiled, ['resource:user%2F2'], { address: 'project:p1' })).toBeNull();
+  });
+
   it('refuses overlapping patterns for one type', () => {
     expect(() => compileKnowledgeScopes({ 'team:$orgId:$teamId': {}, 'team:$teamId': {} })).toThrow(
       KnowledgeDeclarationError,
