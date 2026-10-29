@@ -6,6 +6,7 @@ import {
   KnowledgeMoveTooLargeError,
   KnowledgePageDepthError,
   KnowledgePageHasChildrenError,
+  KnowledgePageKeyConflictError,
   knowledgePositionBetween,
   knowledgeScopeReadable,
   MAX_KNOWLEDGE_MOVE_PAGES,
@@ -25,6 +26,7 @@ import type {
 } from './pages';
 
 type Store = KnowledgePageStore;
+type Subtree = Array<{ page: KnowledgePage; relativeDepth: number }>;
 
 const DEFAULT_SEARCH_LIMIT = 20;
 
@@ -149,9 +151,12 @@ export class InMemoryKnowledgePageStore implements KnowledgePageStore {
     return depth;
   }
 
-  /** The page and every page under it (deleted included), with each one's depth relative to it. */
-  #subtree(root: KnowledgePage): Array<{ page: KnowledgePage; relativeDepth: number }> {
-    const out: Array<{ page: KnowledgePage; relativeDepth: number }> = [];
+  /**
+   * The page and every page under it, with each one's depth relative to it. Soft-deleted pages are
+   * included (they move with their parent) but flagged, since size and depth count live pages only.
+   */
+  #subtree(root: KnowledgePage): Subtree {
+    const out: Subtree = [];
     const visit = (page: KnowledgePage, relativeDepth: number) => {
       out.push({ page, relativeDepth });
       for (const child of this.#pages.values()) if (child.parentId === page.id) visit(child, relativeDepth + 1);
@@ -224,7 +229,19 @@ export class InMemoryKnowledgePageStore implements KnowledgePageStore {
     const created = !scope;
     let parentConflict: { existingParentId: string | null; requestedParentId: string | null } | undefined;
     if (scope) {
-      if (input.parentId !== undefined && input.parentId !== scope.parentId) {
+      if (scope.parentId === null && input.parentId != null) {
+        if (!this.#page(input.parentId).isScope) {
+          throw new Error(`Knowledge scope ${input.address} must be placed under a scope page`);
+        }
+        if (input.parentId === scope.id || this.#subtree(scope).some(entry => entry.page.id === input.parentId)) {
+          throw new Error(`Knowledge scope placement must not form a cycle`);
+        }
+        scope.parentId = input.parentId;
+        scope.position = this.#nextPosition(input.parentId);
+        scope.version++;
+        scope.updatedAt = this.#now();
+        scope.updatedBy = clone(input.provenance);
+      } else if (input.parentId != null && input.parentId !== scope.parentId) {
         parentConflict = { existingParentId: scope.parentId, requestedParentId: input.parentId };
       }
     } else {
@@ -345,7 +362,7 @@ export class InMemoryKnowledgePageStore implements KnowledgePageStore {
     const id = input.id ?? crypto.randomUUID();
     if (this.#depth(parent) + 1 > MAX_KNOWLEDGE_PAGE_DEPTH) throw new KnowledgePageDepthError(id);
     if (input.key !== undefined && this.#pageByKey(scopeId, input.key)) {
-      throw new Error(`Knowledge page key "${input.key}" already exists in scope ${scopeId}`);
+      throw new KnowledgePageKeyConflictError(input.key, scopeId);
     }
     const page = this.#newPage({ ...input, id, scopeId, isScope: false });
     this.#log('page-created', page, input.provenance);
@@ -370,21 +387,24 @@ export class InMemoryKnowledgePageStore implements KnowledgePageStore {
     return clone(page);
   }
 
-  /** Checks moving `subtree` under `parent`: cycles, depth and size. */
-  #checkCarry(
-    pageId: string,
-    subtree: Array<{ page: KnowledgePage; relativeDepth: number }>,
-    parent: KnowledgePage,
-    rootCounts: boolean,
-  ): void {
+  /**
+   * Checks moving `subtree` under `parent`: cycles, depth, size and key clashes in the destination
+   * scope. Only live pages count; `rootCounts` is false for a merge, whose root (the source) is deleted.
+   */
+  #checkCarry(pageId: string, subtree: Subtree, parent: KnowledgePage, rootCounts: boolean): void {
     if (subtree.some(entry => entry.page.id === parent.id)) {
       throw new Error(`Knowledge page ${pageId} can't move under itself or its own subtree`);
     }
-    const carried = rootCounts ? subtree.length : subtree.length - 1;
-    if (carried > MAX_KNOWLEDGE_MOVE_PAGES) throw new KnowledgeMoveTooLargeError(pageId, carried);
-    const height = Math.max(...subtree.map(entry => entry.relativeDepth));
+    const live = subtree.filter(entry => !entry.page.deletedAt && (rootCounts || entry.relativeDepth > 0));
+    if (live.length > MAX_KNOWLEDGE_MOVE_PAGES) throw new KnowledgeMoveTooLargeError(pageId, live.length);
+    const height = Math.max(0, ...live.map(entry => entry.relativeDepth));
     const deepest = this.#depth(parent) + (rootCounts ? height + 1 : height);
     if (deepest > MAX_KNOWLEDGE_PAGE_DEPTH) throw new KnowledgePageDepthError(pageId);
+    const scopeId = parent.isScope ? parent.id : parent.scopeId;
+    for (const { page } of live) {
+      if (page.key === undefined || page.scopeId === scopeId) continue;
+      if (this.#pageByKey(scopeId, page.key)) throw new KnowledgePageKeyConflictError(page.key, scopeId);
+    }
   }
 
   async movePage(input: Parameters<Store['movePage']>[0]) {

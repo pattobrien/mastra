@@ -11,9 +11,9 @@ export type KnowledgeSemanticDocumentType = 'node' | 'record';
 /** @experimental Knowledge APIs are experimental and may change without notice. */
 export type KnowledgeSemanticOperation = 'upsert' | 'delete';
 /** @experimental Knowledge APIs are experimental and may change without notice. */
-export const KNOWLEDGE_STORAGE_CONTRACT_VERSION = 2 as const;
+export const KNOWLEDGE_STORAGE_CONTRACT_VERSION = 4 as const;
 /** @experimental Knowledge APIs are experimental and may change without notice. */
-export const KNOWLEDGE_STORAGE_SCHEMA_VERSION = 2 as const;
+export const KNOWLEDGE_STORAGE_SCHEMA_VERSION = 4 as const;
 
 /** @experimental Knowledge APIs are experimental and may change without notice. */
 export interface KnowledgeStorageCapabilities {
@@ -60,7 +60,9 @@ export function inspectKnowledgeSchema(snapshot: KnowledgeSchemaSnapshot): Knowl
   return {
     status: 'incompatible-reset-required',
     schemaVersion: snapshot.schemaVersion ?? null,
-    reason: snapshot.reason ?? 'Existing experimental Knowledge tables are not compatible with schema version 2.',
+    reason:
+      snapshot.reason ??
+      `Existing experimental Knowledge tables are not compatible with schema version ${KNOWLEDGE_STORAGE_SCHEMA_VERSION}.`,
   };
 }
 
@@ -1057,30 +1059,64 @@ export abstract class KnowledgeStorage extends StorageDomain implements Knowledg
     return Promise.reject(new KnowledgeUnsupportedCapabilityError('listPins'));
   }
 
-  abstract createNode(input: CreateKnowledgeNodeInput): Promise<KnowledgeNode>;
-  abstract getNode(id: string): Promise<KnowledgeNode | null>;
-  abstract getNodeByName(input: { name: string; scope: KnowledgeScope }): Promise<KnowledgeNode | null>;
-  abstract resolveNode(input: { name: string; scope: KnowledgeScope }): Promise<KnowledgeNode | null>;
-  abstract listNodes(input: ListKnowledgeNodesInput): Promise<KnowledgeNode[]>;
-  abstract updateNode(input: UpdateKnowledgeNodeInput): Promise<KnowledgeNode>;
-  abstract mergeNodes(input: { sourceId: string; targetId: string; sourceVersion: number }): Promise<KnowledgeNode>;
+  // Schema-2 node/record surface, removed when Knowledge moves to the page store. Schema-4
+  // adapters needn't implement it; the defaults refuse.
+  createNode(_input: CreateKnowledgeNodeInput): Promise<KnowledgeNode> {
+    return Promise.reject(new KnowledgeUnsupportedCapabilityError('createNode'));
+  }
+  getNode(_id: string): Promise<KnowledgeNode | null> {
+    return Promise.reject(new KnowledgeUnsupportedCapabilityError('getNode'));
+  }
+  getNodeByName(_input: { name: string; scope: KnowledgeScope }): Promise<KnowledgeNode | null> {
+    return Promise.reject(new KnowledgeUnsupportedCapabilityError('getNodeByName'));
+  }
+  resolveNode(_input: { name: string; scope: KnowledgeScope }): Promise<KnowledgeNode | null> {
+    return Promise.reject(new KnowledgeUnsupportedCapabilityError('resolveNode'));
+  }
+  listNodes(_input: ListKnowledgeNodesInput): Promise<KnowledgeNode[]> {
+    return Promise.reject(new KnowledgeUnsupportedCapabilityError('listNodes'));
+  }
+  updateNode(_input: UpdateKnowledgeNodeInput): Promise<KnowledgeNode> {
+    return Promise.reject(new KnowledgeUnsupportedCapabilityError('updateNode'));
+  }
+  mergeNodes(_input: { sourceId: string; targetId: string; sourceVersion: number }): Promise<KnowledgeNode> {
+    return Promise.reject(new KnowledgeUnsupportedCapabilityError('mergeNodes'));
+  }
 
-  abstract appendKnowledge(input: AppendKnowledgeInput): Promise<KnowledgeRecord>;
-  abstract getKnowledge(input: { id: string; includeDeleted?: boolean }): Promise<KnowledgeRecord | null>;
-  abstract listKnowledgeAbout(input: QueryKnowledgeInput): Promise<QueryKnowledgeOutput>;
-  abstract listKnowledgeMentioning(input: QueryKnowledgeInput): Promise<QueryKnowledgeOutput>;
-  abstract listKnowledgeRelatedTo(input: QueryKnowledgeInput): Promise<QueryKnowledgeOutput>;
-  abstract knowledgeBySource(input: QueryKnowledgeBySourceInput): Promise<QueryKnowledgeOutput>;
-  abstract removeKnowledge(input: { id: string; deletedBy: string }): Promise<KnowledgeRecord>;
-  abstract restoreKnowledge(input: { id: string }): Promise<KnowledgeRecord>;
-  abstract rescopeKnowledge(input: { id: string; scope: KnowledgeScope }): Promise<KnowledgeRecord>;
+  appendKnowledge(_input: AppendKnowledgeInput): Promise<KnowledgeRecord> {
+    return Promise.reject(new KnowledgeUnsupportedCapabilityError('appendKnowledge'));
+  }
+  getKnowledge(_input: { id: string; includeDeleted?: boolean }): Promise<KnowledgeRecord | null> {
+    return Promise.reject(new KnowledgeUnsupportedCapabilityError('getKnowledge'));
+  }
+  listKnowledgeAbout(_input: QueryKnowledgeInput): Promise<QueryKnowledgeOutput> {
+    return Promise.reject(new KnowledgeUnsupportedCapabilityError('listKnowledgeAbout'));
+  }
+  listKnowledgeMentioning(_input: QueryKnowledgeInput): Promise<QueryKnowledgeOutput> {
+    return Promise.reject(new KnowledgeUnsupportedCapabilityError('listKnowledgeMentioning'));
+  }
+  listKnowledgeRelatedTo(_input: QueryKnowledgeInput): Promise<QueryKnowledgeOutput> {
+    return Promise.reject(new KnowledgeUnsupportedCapabilityError('listKnowledgeRelatedTo'));
+  }
+  knowledgeBySource(_input: QueryKnowledgeBySourceInput): Promise<QueryKnowledgeOutput> {
+    return Promise.reject(new KnowledgeUnsupportedCapabilityError('knowledgeBySource'));
+  }
+  removeKnowledge(_input: { id: string; deletedBy: string }): Promise<KnowledgeRecord> {
+    return Promise.reject(new KnowledgeUnsupportedCapabilityError('removeKnowledge'));
+  }
+  restoreKnowledge(_input: { id: string }): Promise<KnowledgeRecord> {
+    return Promise.reject(new KnowledgeUnsupportedCapabilityError('restoreKnowledge'));
+  }
+  rescopeKnowledge(_input: { id: string; scope: KnowledgeScope }): Promise<KnowledgeRecord> {
+    return Promise.reject(new KnowledgeUnsupportedCapabilityError('rescopeKnowledge'));
+  }
 
-  abstract search(input: SearchKnowledgeInput): Promise<SearchKnowledgeResult[]>;
-  abstract listActivity(input: {
-    scope: KnowledgeScope;
-    after?: string;
-    limit?: number;
-  }): Promise<KnowledgeActivityEvent[]>;
+  search(_input: SearchKnowledgeInput): Promise<SearchKnowledgeResult[]> {
+    return Promise.reject(new KnowledgeUnsupportedCapabilityError('search'));
+  }
+  listActivity(_input: { scope: KnowledgeScope; after?: string; limit?: number }): Promise<KnowledgeActivityEvent[]> {
+    return Promise.reject(new KnowledgeUnsupportedCapabilityError('listActivity'));
+  }
 
   /**
    * @deprecated Curation cursors were removed. Observation-time curate is the only Knowledge writer and needs no
@@ -1102,12 +1138,20 @@ export abstract class KnowledgeStorage extends StorageDomain implements Knowledg
     throw new Error(KNOWLEDGE_CURATION_CURSOR_REMOVED_MESSAGE);
   }
 
-  abstract listSemanticOutbox(input?: {
+  listSemanticOutbox(_input?: {
     status?: KnowledgeSemanticOutboxEntry['status'];
     scope?: KnowledgeScope;
     limit?: number;
-  }): Promise<KnowledgeSemanticOutboxEntry[]>;
-  abstract claimSemanticOutbox(input: ClaimKnowledgeSemanticOutboxInput): Promise<KnowledgeSemanticOutboxEntry[]>;
-  abstract completeSemanticOutbox(input: { ids: string[]; workerId: string }): Promise<void>;
-  abstract releaseSemanticOutbox(input: { ids: string[]; workerId: string; retryAt?: Date }): Promise<void>;
+  }): Promise<KnowledgeSemanticOutboxEntry[]> {
+    return Promise.reject(new KnowledgeUnsupportedCapabilityError('listSemanticOutbox'));
+  }
+  claimSemanticOutbox(_input: ClaimKnowledgeSemanticOutboxInput): Promise<KnowledgeSemanticOutboxEntry[]> {
+    return Promise.reject(new KnowledgeUnsupportedCapabilityError('claimSemanticOutbox'));
+  }
+  completeSemanticOutbox(_input: { ids: string[]; workerId: string }): Promise<void> {
+    return Promise.reject(new KnowledgeUnsupportedCapabilityError('completeSemanticOutbox'));
+  }
+  releaseSemanticOutbox(_input: { ids: string[]; workerId: string; retryAt?: Date }): Promise<void> {
+    return Promise.reject(new KnowledgeUnsupportedCapabilityError('releaseSemanticOutbox'));
+  }
 }
