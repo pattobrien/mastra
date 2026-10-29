@@ -22,7 +22,4 @@ export {
   expectSerializedStreamChunks,
   consumeSSEStream,
 } from './test-helpers';
-export {
-  createKnowledgeRoutesTestSuite,
-  type KnowledgeRoutesTestSuiteConfig,
-} from './knowledge-routes-test-suite';
+export { createKnowledgeRoutesTestSuite, type KnowledgeRoutesTestSuiteConfig } from './knowledge-routes-test-suite';

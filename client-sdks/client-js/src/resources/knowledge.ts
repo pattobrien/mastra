@@ -65,7 +65,9 @@ export class Knowledge extends BaseResource {
 
   /** Pages and notes matching `searchQuery`, optionally only within the given scope page ids. */
   search(searchQuery: string, params: { scopeIds?: string[]; limit?: number } = {}): Promise<KnowledgeSearchResponse> {
-    return this.request(`${this.base}/search${query({ q: searchQuery, scopeId: params.scopeIds, limit: params.limit })}`);
+    return this.request(
+      `${this.base}/search${query({ q: searchQuery, scopeId: params.scopeIds, limit: params.limit })}`,
+    );
   }
 
   /** A newest-first page of activity, optionally for one scope or one page. */

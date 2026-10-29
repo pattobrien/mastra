@@ -116,7 +116,9 @@ export const GET_KNOWLEDGE_TREE_ROUTE = createRoute({
   handler: async ({ mastra, requestContext, knowledgeKey, parentId, cursor, limit }) => {
     try {
       const store = await resolveStore(mastra, requestContext, knowledgeKey);
-      return { ...(await listKnowledgeTreeChildren(store, { parentId: parentId ?? null, read: 'all', cursor, limit })) };
+      return {
+        ...(await listKnowledgeTreeChildren(store, { parentId: parentId ?? null, read: 'all', cursor, limit })),
+      };
     } catch (error) {
       return handleError(error, 'Error reading Knowledge tree');
     }

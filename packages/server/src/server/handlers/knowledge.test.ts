@@ -22,8 +22,9 @@ const provenance = { author: 'agent:alex' };
 async function setup() {
   const knowledge = new Knowledge({ id: 'kb', storage: new InMemoryStore({ id: 'kb' }) });
   const store = await knowledge.getStorage();
-  const acme = (await store.materializeScope({ address: 'org:acme', declaration: 'org:$orgId', name: 'Acme', provenance }))
-    .scope;
+  const acme = (
+    await store.materializeScope({ address: 'org:acme', declaration: 'org:$orgId', name: 'Acme', provenance })
+  ).scope;
   const scope = async (address: string, name: string) =>
     (
       await store.materializeScope({
@@ -67,9 +68,7 @@ describe('Knowledge read routes', () => {
       'Support',
       'Engineering',
     ]);
-    expect(names((await call(GET_KNOWLEDGE_TREE_ROUTE, { ...args, parentId: support.id })).pages)).toEqual([
-      'Refunds',
-    ]);
+    expect(names((await call(GET_KNOWLEDGE_TREE_ROUTE, { ...args, parentId: support.id })).pages)).toEqual(['Refunds']);
   });
 
   it('returns a page with ancestors, notes, references and pin, and 404s an unknown page', async () => {
@@ -141,9 +140,9 @@ describe('Knowledge read routes', () => {
 
     const check = vi.fn(async () => true);
     (mastra as any).getServer = () => ({ fga: { filterAccessible, check } });
-    expect(names((await call(GET_KNOWLEDGE_TREE_ROUTE, { mastra, requestContext, knowledgeKey: 'main' })).pages)).toEqual(
-      ['Acme'],
-    );
+    expect(
+      names((await call(GET_KNOWLEDGE_TREE_ROUTE, { mastra, requestContext, knowledgeKey: 'main' })).pages),
+    ).toEqual(['Acme']);
     expect(check).toHaveBeenCalledWith(
       { id: 'u1' },
       { resource: { type: 'knowledge', id: 'kb' }, permission: 'knowledge:read' },
