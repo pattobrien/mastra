@@ -1,0 +1,85 @@
+name: Release (fork)
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'agent-sdks/claude/**'
+      - 'scripts/release/**'
+      - '.github/workflows/release-fork.yml'
+    tags:
+      - 'mastra-claude@*-fork.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Fork version to publish, e.g. 0.3.4-fork.2; must equal agent-sdks/claude/package.json version plus -fork.N. Empty publishes the next fork.N.
+        required: false
+        type: string
+
+concurrency:
+  group: release-fork-${{ github.ref_type == 'branch' && github.ref_name || inputs.version || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  publish:
+    name: Build and publish @pattobrien/mastra-claude to GitHub Packages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@e8d4307400f9427dba7cb98e488d6ab85f1cec5f
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271
+        with:
+          run_install: false
+
+      - name: Setup Node.js 24.x
+        uses: actions/setup-node@04be95cf3511ea51ebf9f224ddfb99cc7ab87cd4
+        with:
+          node-version: 24.22.1
+          cache: 'pnpm'
+          package-manager-cache: false
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Resolve the fork version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            VERSION="$INPUT_VERSION"
+          elif [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#mastra-claude@}"
+          else
+            VERSION="$(node scripts/release/fork-next-version.ts)"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Publishing $VERSION"
+
+      - name: Build @mastra/claude and its workspace dependencies
+        run: pnpm turbo build --filter @mastra/claude
+
+      - name: Authenticate to GitHub Packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: pnpm config set //npm.pkg.github.com/:_authToken "$NODE_AUTH_TOKEN"
+
+      - name: Publish to GitHub Packages
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: node scripts/release/fork-publish.ts "$VERSION"
+
+      - name: Tag the release
+        if: github.ref_type == 'branch'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git tag "mastra-claude@$VERSION" "$GITHUB_SHA"
+          git push origin "mastra-claude@$VERSION"
