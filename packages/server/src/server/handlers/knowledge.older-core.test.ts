@@ -1,5 +1,6 @@
 import { Knowledge } from '@mastra/core/knowledge';
 import { Mastra } from '@mastra/core/mastra';
+import { RequestContext } from '@mastra/core/request-context';
 import { InMemoryStore } from '@mastra/core/storage';
 import { describe, expect, it, vi } from 'vitest';
 import { HTTPException } from '../http-exception';
@@ -45,5 +46,20 @@ describe('Knowledge read routes on a @mastra/core without the page readers', () 
     const error = await call(route, { mastra, knowledgeKey: 'main', ...extra }).catch(caught => caught);
     expect(error).toBeInstanceOf(HTTPException);
     expect(error).toMatchObject({ status: 501, message: 'Knowledge browsing needs @mastra/core 1.81.0 or later.' });
+  });
+
+  it('gives a caller FGA refuses, or an unknown instance, the same 404 as on a current core', async () => {
+    const guarded = new Mastra({
+      logger: false,
+      knowledge: { main: new Knowledge({ id: 'kb', scopes: {}, storage: new InMemoryStore({ id: 'kb' }) }) },
+    });
+    (guarded as any).getServer = () => ({ fga: { check: async () => false } });
+    const requestContext = new RequestContext();
+    requestContext.set('user', { id: 'u1' });
+    for (const knowledgeKey of ['main', 'missing']) {
+      await expect(
+        call(GET_KNOWLEDGE_TREE_ROUTE, { mastra: guarded, requestContext, knowledgeKey }),
+      ).rejects.toMatchObject({ status: 404 });
+    }
   });
 });

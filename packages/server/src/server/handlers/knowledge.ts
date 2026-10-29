@@ -139,7 +139,6 @@ async function resolveStore(
   requestContext: RequestContext | undefined,
   knowledgeKey: string | undefined,
 ): Promise<{ store: KnowledgeStorage; read: KnowledgeReadScope; readers: KnowledgePageReaders }> {
-  const readers = requirePageReaders();
   const instance = knowledgeKey ? mastra.listKnowledge()[knowledgeKey] : undefined;
   if (!knowledgeKey || !instance)
     throw new HTTPException(404, { message: `Knowledge ${knowledgeKey ?? ''} not found` });
@@ -154,6 +153,7 @@ async function resolveStore(
     });
     if (!allowed) throw new HTTPException(404, { message: `Knowledge ${knowledgeKey} not found` });
   }
+  const readers = requirePageReaders();
   const read = await callerReadScope(mastra, requestContext, instance);
   return { store: await instance.getStorage(), read, readers };
 }
