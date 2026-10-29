@@ -14,6 +14,8 @@ import type {
   LanguageModelUsage,
   ProviderMetadata,
   MastraModelOutput,
+  ToolCallPayload,
+  ToolResultPayload,
 } from '@mastra/core/stream';
 import { ChunkFrom } from '@mastra/core/stream';
 import {
@@ -21,6 +23,8 @@ import {
   createNoopModel,
   createProviderMetadata,
   createSDKAgentTelemetry,
+  createToolCallChunk,
+  createToolResultChunk,
   enqueueFinishChunks,
   enqueueStartChunks,
   enqueueTextDelta,
@@ -173,7 +177,11 @@ export class ClaudeSDKAgent extends Agent {
       runId,
       provider: PROVIDER,
       result,
-      options: { ...telemetry.outputOptions(), structuredOutput: options?.structuredOutput as any },
+      options: {
+        ...telemetry.outputOptions(),
+        structuredOutput: options?.structuredOutput as any,
+        returnScorerData: options?.returnScorerData,
+      },
     });
   }
 
@@ -212,7 +220,11 @@ export class ClaudeSDKAgent extends Agent {
       modelId,
       provider: PROVIDER,
       stream: telemetry.wrapStream(runClaudeAsMastraStream(prompt, this.options, runId, telemetry, options)),
-      options: { ...telemetry.outputOptions(), structuredOutput: options?.structuredOutput as any },
+      options: {
+        ...telemetry.outputOptions(),
+        structuredOutput: options?.structuredOutput as any,
+        returnScorerData: options?.returnScorerData,
+      },
     });
   }
 
@@ -295,12 +307,18 @@ async function runClaudeGenerate<OUTPUT>(
   let text = '';
   let structuredOutputValue: unknown;
   const usage = createClaudeUsageCollector();
+  const toolNames = new Map<string, string>();
+  const toolCalls: ToolCallPayload[] = [];
+  const toolResults: ToolResultPayload[] = [];
 
   for await (const message of observeClaudeMessages(
     runClaude(prompt, options, runOptions?.abortSignal ?? runOptions?.signal, runOptions),
     telemetry,
   )) {
     usage.record(message);
+    const toolPayloads = getClaudeToolPayloads(message, toolNames);
+    toolCalls.push(...toolPayloads.toolCalls);
+    toolResults.push(...toolPayloads.toolResults);
     if (message.type === 'result') {
       if (message.subtype !== 'success') {
         throw new Error(message.errors.join('\n') || `Claude Agent SDK failed with ${message.subtype}`);
@@ -329,6 +347,8 @@ async function runClaudeGenerate<OUTPUT>(
     providerMetadata: getClaudeProviderMetadata(options, totals),
     costContext: getClaudeCostContext(options, totals),
     object,
+    toolCalls,
+    toolResults,
   };
 }
 
@@ -345,6 +365,7 @@ function runClaudeAsMastraStream<OUTPUT>(
       const responseId = globalThis.crypto.randomUUID();
       const modelId = getModelId(options);
       const usage = createClaudeUsageCollector();
+      const toolNames = new Map<string, string>();
       let text = '';
       let structuredOutputValue: unknown;
       let sawDelta = false;
@@ -364,6 +385,13 @@ function runClaudeAsMastraStream<OUTPUT>(
           telemetry,
         )) {
           usage.record(message);
+          const toolPayloads = getClaudeToolPayloads(message, toolNames);
+          for (const toolCall of toolPayloads.toolCalls) {
+            controller.enqueue(createToolCallChunk(runId, toolCall));
+          }
+          for (const toolResult of toolPayloads.toolResults) {
+            controller.enqueue(createToolResultChunk(runId, toolResult));
+          }
           const delta = getTextDelta(message);
           if (delta) {
             sawDelta = true;
@@ -471,6 +499,24 @@ function recordClaudeToolTelemetry<OUTPUT>(message: SDKMessage, telemetry: SDKAg
   }
 }
 
+function getClaudeToolPayloads(
+  message: SDKMessage,
+  toolNames: Map<string, string>,
+): { toolCalls: ToolCallPayload[]; toolResults: ToolResultPayload[] } {
+  const toolCalls = getClaudeToolCalls(message).map(toolCall => {
+    toolNames.set(toolCall.toolCallId, toolCall.toolName);
+    return { toolCallId: toolCall.toolCallId, toolName: toolCall.toolName, args: toRecord(toolCall.input) };
+  });
+  const toolResults = getClaudeToolResults(message).map(toolResult => ({
+    toolCallId: toolResult.toolCallId,
+    toolName: toolNames.get(toolResult.toolCallId) ?? '',
+    result: toolResult.output,
+    isError: toolResult.isError === true,
+  }));
+
+  return { toolCalls, toolResults };
+}
+
 function getClaudeToolCalls(message: SDKMessage): Array<{ toolCallId: string; toolName: string; input?: unknown }> {
   if (message.type !== 'assistant') {
     return [];
@@ -507,6 +553,14 @@ function getContentBlocks(message: unknown): unknown[] {
   }
 
   return Array.isArray(message.content) ? message.content : [];
+}
+
+function toRecord(value: unknown): Record<string, unknown> {
+  if (isRecord(value) && !Array.isArray(value)) {
+    return value;
+  }
+
+  return value === undefined ? {} : { value };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

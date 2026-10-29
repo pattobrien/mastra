@@ -3,7 +3,7 @@ import type { ReadableStreamDefaultController } from 'node:stream/web';
 
 import type { AgentExecutionOptionsBase, MastraLanguageModel, PublicStructuredOutputOptions } from '@mastra/core/agent';
 import { MessageList } from '@mastra/core/agent/message-list';
-import type { MessageListInput } from '@mastra/core/agent/message-list';
+import type { MastraDBMessage, MastraMessagePart, MessageListInput } from '@mastra/core/agent/message-list';
 import type { Mastra } from '@mastra/core/mastra';
 import { EntityType, executeWithContext, getOrCreateSpan, SpanType } from '@mastra/core/observability';
 import type {
@@ -15,7 +15,15 @@ import type {
 } from '@mastra/core/observability';
 import type { RequestContext } from '@mastra/core/request-context';
 import { standardSchemaToJSONSchema, toStandardSchema } from '@mastra/core/schema';
-import type { ChunkType, FullOutput, JSONValue, LanguageModelUsage, ProviderMetadata } from '@mastra/core/stream';
+import type {
+  ChunkType,
+  FullOutput,
+  JSONValue,
+  LanguageModelUsage,
+  ProviderMetadata,
+  ToolCallPayload,
+  ToolResultPayload,
+} from '@mastra/core/stream';
 import { ChunkFrom, MastraModelOutput } from '@mastra/core/stream';
 type MastraModelOutputOptions<OUTPUT = undefined> = ConstructorParameters<
   typeof MastraModelOutput<OUTPUT>
@@ -52,6 +60,8 @@ export type SDKModelGenerateResult = {
   providerMetadata?: ProviderMetadata;
   costContext?: CostContext;
   object?: unknown;
+  toolCalls?: ToolCallPayload[];
+  toolResults?: ToolResultPayload[];
 };
 
 export function createNoopModel({ modelId, provider }: { modelId: string; provider: string }): MastraLanguageModel {
@@ -83,6 +93,8 @@ export function createCompletedMastraStream({
   providerMetadata,
   costContext,
   object,
+  toolCalls = [],
+  toolResults = [],
 }: {
   runId: string;
   prompt: string;
@@ -93,6 +105,8 @@ export function createCompletedMastraStream({
   providerMetadata?: ProviderMetadata;
   costContext?: CostContext;
   object?: unknown;
+  toolCalls?: ToolCallPayload[];
+  toolResults?: ToolResultPayload[];
 }): ReadableStream<ChunkType> {
   return new ReadableStream<ChunkType>({
     start(controller) {
@@ -105,6 +119,12 @@ export function createCompletedMastraStream({
         modelId,
         providerMetadata,
       });
+      for (const toolCall of toolCalls) {
+        controller.enqueue(createToolCallChunk(runId, toolCall));
+      }
+      for (const toolResult of toolResults) {
+        controller.enqueue(createToolResultChunk(runId, toolResult));
+      }
       if (text) {
         enqueueTextDelta(controller, runId, textId, text);
       }
@@ -131,7 +151,6 @@ export function createMastraOutput<OUTPUT>({
   modelId,
   provider,
   stream,
-  responseText = '',
   options,
 }: {
   messages: MessageListInput;
@@ -139,12 +158,11 @@ export function createMastraOutput<OUTPUT>({
   modelId: string;
   provider: string;
   stream: ReadableStream<ChunkType>;
-  responseText?: string;
   options?: Partial<MastraModelOutputOptions<OUTPUT>>;
 }): MastraModelOutput<OUTPUT> {
   const messageList = new MessageList();
+  const messageId = globalThis.crypto.randomUUID();
   messageList.add(messages, 'input');
-  messageList.add([{ role: 'assistant', content: responseText }], 'response');
 
   return new MastraModelOutput<OUTPUT>({
     model: {
@@ -152,14 +170,105 @@ export function createMastraOutput<OUTPUT>({
       provider,
       version: 'v3',
     },
-    stream: stream as ReadableStream<ChunkType<OUTPUT>>,
+    stream: withResponseMessage(stream, messageList, messageId) as ReadableStream<ChunkType<OUTPUT>>,
     messageList,
-    messageId: globalThis.crypto.randomUUID(),
+    messageId,
     options: {
       ...options,
       runId,
     },
   });
+}
+
+function withResponseMessage(
+  stream: ReadableStream<ChunkType>,
+  messageList: MessageList,
+  messageId: string,
+): ReadableStream<ChunkType> {
+  let text = '';
+  let added = false;
+  const toolCalls: ToolCallPayload[] = [];
+  const toolResults = new Map<string, ToolResultPayload>();
+
+  return stream.pipeThrough(
+    new TransformStream<ChunkType, ChunkType>({
+      transform(chunk, controller) {
+        if (chunk.type === 'text-delta') {
+          text += chunk.payload.text;
+        }
+        if (chunk.type === 'tool-call') {
+          toolCalls.push(chunk.payload);
+        }
+        if (chunk.type === 'tool-result') {
+          toolResults.set(chunk.payload.toolCallId, chunk.payload);
+        }
+        if (chunk.type === 'step-finish' && !added) {
+          added = true;
+          const message = buildResponseMessage({ messageId, text, toolCalls, toolResults });
+          if (message) {
+            messageList.add(message, 'response');
+          }
+        }
+        controller.enqueue(chunk);
+      },
+    }),
+  );
+}
+
+function buildResponseMessage({
+  messageId,
+  text,
+  toolCalls,
+  toolResults,
+}: {
+  messageId: string;
+  text: string;
+  toolCalls: ToolCallPayload[];
+  toolResults: Map<string, ToolResultPayload>;
+}): MastraDBMessage | undefined {
+  const parts: MastraMessagePart[] = toolCalls.map(toolCall => {
+    const toolResult = toolResults.get(toolCall.toolCallId);
+    if (!toolResult) {
+      return {
+        type: 'tool-invocation',
+        toolInvocation: {
+          state: 'call',
+          toolCallId: toolCall.toolCallId,
+          toolName: toolCall.toolName,
+          args: toolCall.args,
+        },
+      };
+    }
+
+    return {
+      type: 'tool-invocation',
+      toolInvocation: {
+        state: 'result',
+        toolCallId: toolCall.toolCallId,
+        toolName: toolCall.toolName,
+        args: toolCall.args,
+        result: toolResult.result,
+        ...(toolResult.isError ? { isError: true } : {}),
+      },
+    };
+  });
+  if (text) {
+    parts.push({ type: 'text', text });
+  }
+  if (parts.length === 0) {
+    return undefined;
+  }
+
+  return {
+    id: messageId,
+    role: 'assistant',
+    createdAt: new Date(),
+    content: {
+      format: 2,
+      parts,
+      ...(text ? { content: text } : {}),
+    },
+  };
 }
 
 export function toFullOutput<OUTPUT>({
@@ -186,6 +295,8 @@ export function toFullOutput<OUTPUT>({
     providerMetadata: result.providerMetadata,
     costContext: result.costContext,
     object: result.object,
+    toolCalls: result.toolCalls,
+    toolResults: result.toolResults,
   });
 
   return createMastraOutput<OUTPUT>({
@@ -194,7 +305,6 @@ export function toFullOutput<OUTPUT>({
     modelId: result.response.modelId,
     provider,
     stream,
-    responseText: text,
     options,
   }).getFullOutput();
 }
@@ -680,6 +790,24 @@ export function enqueueTextDelta(
       text,
     },
   });
+}
+
+export function createToolCallChunk(runId: string, payload: ToolCallPayload): ChunkType {
+  return {
+    type: 'tool-call',
+    runId,
+    from: ChunkFrom.AGENT,
+    payload,
+  };
+}
+
+export function createToolResultChunk(runId: string, payload: ToolResultPayload): ChunkType {
+  return {
+    type: 'tool-result',
+    runId,
+    from: ChunkFrom.AGENT,
+    payload,
+  };
 }
 
 export function enqueueFinishChunks(
