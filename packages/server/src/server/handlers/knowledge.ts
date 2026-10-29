@@ -7,7 +7,8 @@ import {
 } from '@mastra/core/knowledge';
 import type { Mastra } from '@mastra/core/mastra';
 import type { RequestContext } from '@mastra/core/request-context';
-import type { KnowledgeStorage } from '@mastra/core/storage';
+import type { KnowledgeReadScope, KnowledgeStorage } from '@mastra/core/storage';
+import { MASTRA_KNOWLEDGE_PRINCIPALS_KEY } from '../constants';
 import { MastraFGAPermissions } from '../fga-permissions';
 import { HTTPException } from '../http-exception';
 import {
@@ -32,12 +33,61 @@ import { handleError } from './error';
 /**
  * Read-only browsing of Knowledge instances registered on Mastra, for Studio. Nothing here writes.
  *
- * These routes read as the instance owner: every page and note, whatever its scope. Who may call them at
- * all is decided by the app's auth: the path derives `knowledge:read` (`GET /knowledge/...`), and with FGA
- * configured each instance is filtered and gated by `knowledge:read` on that instance. Narrowing reads by a
- * caller's principals happens on agent runs, not here. The routes are opt-in (KNOWLEDGE_ROUTES); hosts with
- * their own scoping (Factory) do not mount them.
+ * What a caller reads depends on whether the app has auth configured (`server.auth` or `studio.auth`):
+ * - No auth: probably a local or test project, so the routes read as the instance owner (`'all'`).
+ * - Auth: reads are narrowed to what the signed-in caller can read. The app maps the user to Knowledge
+ *   principals by setting MASTRA_KNOWLEDGE_PRINCIPALS_KEY in `auth.authorize` (a `string[]`, or `'all'`
+ *   for an admin); the instance turns them into a read scope with `readScopeFor`. A caller with no
+ *   mapping is refused with 403.
+ *
+ * On top of that the path derives `knowledge:read` (`GET /knowledge/...`), and with FGA configured each
+ * instance is filtered and gated by `knowledge:read` on that instance. The routes are opt-in
+ * (KNOWLEDGE_ROUTES); hosts with their own scoping (Factory) do not mount them.
  */
+
+/** The instance method that turns principals into a read scope; lands on `Knowledge` with the schema-4 migration. */
+interface KnowledgeReadScopeResolver {
+  readScopeFor(principals: string[]): Promise<KnowledgeReadScope>;
+}
+
+function hasAuth(mastra: Mastra): boolean {
+  return Boolean(mastra.getServer?.()?.auth || (mastra as any).getStudio?.()?.auth);
+}
+
+async function callerReadScope(
+  mastra: Mastra,
+  requestContext: RequestContext | undefined,
+  instance: object,
+): Promise<KnowledgeReadScope> {
+  if (!hasAuth(mastra)) return 'all';
+
+  const principals = requestContext?.get(MASTRA_KNOWLEDGE_PRINCIPALS_KEY);
+  if (principals === undefined || principals === null) {
+    throw new HTTPException(403, {
+      message: `Knowledge access is not mapped for this caller. Set request context key "${MASTRA_KNOWLEDGE_PRINCIPALS_KEY}" in auth.authorize.`,
+    });
+  }
+  if (principals === 'all') return 'all';
+  // The value comes from the app's own authorize code, so a bad one is a host misconfiguration, not a denial.
+  if (!Array.isArray(principals) || principals.some(principal => typeof principal !== 'string')) {
+    throw new HTTPException(500, {
+      message: `Request context key "${MASTRA_KNOWLEDGE_PRINCIPALS_KEY}" must be a string array or 'all'.`,
+    });
+  }
+  const resolver = (instance as Partial<KnowledgeReadScopeResolver>).readScopeFor;
+  if (typeof resolver !== 'function') {
+    throw new HTTPException(501, { message: 'This Knowledge instance cannot resolve principals to a read scope yet.' });
+  }
+  try {
+    return await resolver.call(instance, principals);
+  } catch (error) {
+    // A principal that matches no declared scope type: the app's mapping disagrees with its declarations.
+    if (error instanceof Error && error.name === 'KnowledgeDeclarationError') {
+      throw new HTTPException(500, { message: error.message, cause: error });
+    }
+    throw error;
+  }
+}
 
 async function accessibleInstances(
   mastra: Mastra,
@@ -62,7 +112,7 @@ async function resolveStore(
   mastra: Mastra,
   requestContext: RequestContext | undefined,
   knowledgeKey: string | undefined,
-): Promise<KnowledgeStorage> {
+): Promise<{ store: KnowledgeStorage; read: KnowledgeReadScope }> {
   const instance = knowledgeKey ? mastra.listKnowledge()[knowledgeKey] : undefined;
   if (!knowledgeKey || !instance)
     throw new HTTPException(404, { message: `Knowledge ${knowledgeKey ?? ''} not found` });
@@ -77,7 +127,8 @@ async function resolveStore(
     });
     if (!allowed) throw new HTTPException(404, { message: `Knowledge ${knowledgeKey} not found` });
   }
-  return instance.getStorage();
+  const read = await callerReadScope(mastra, requestContext, instance);
+  return { store: await instance.getStorage(), read };
 }
 
 export const LIST_KNOWLEDGE_ROUTE = createRoute({
@@ -87,7 +138,7 @@ export const LIST_KNOWLEDGE_ROUTE = createRoute({
   responseSchema: listKnowledgeResponseSchema,
   summary: 'List Knowledge instances',
   description:
-    'Returns the Knowledge instances registered on this Mastra instance, by application key. The other Knowledge routes read every page as the instance owner; gate them with auth and, per instance, FGA `knowledge:read`.',
+    "Returns the Knowledge instances registered on this Mastra instance, by application key. Without app auth the other Knowledge routes read the whole instance; with auth they read only what the caller's Knowledge principals (MASTRA_KNOWLEDGE_PRINCIPALS_KEY, set in auth.authorize) can read, and refuse an unmapped caller with 403.",
   tags: ['Knowledge'],
   requiresAuth: true,
   handler: async ({ mastra, requestContext }) => {
@@ -115,9 +166,9 @@ export const GET_KNOWLEDGE_TREE_ROUTE = createRoute({
   requiresAuth: true,
   handler: async ({ mastra, requestContext, knowledgeKey, parentId, cursor, limit }) => {
     try {
-      const store = await resolveStore(mastra, requestContext, knowledgeKey);
+      const { store, read } = await resolveStore(mastra, requestContext, knowledgeKey);
       return {
-        ...(await listKnowledgeTreeChildren(store, { parentId: parentId ?? null, read: 'all', cursor, limit })),
+        ...(await listKnowledgeTreeChildren(store, { parentId: parentId ?? null, read, cursor, limit })),
       };
     } catch (error) {
       return handleError(error, 'Error reading Knowledge tree');
@@ -139,8 +190,8 @@ export const GET_KNOWLEDGE_PAGE_ROUTE = createRoute({
   requiresAuth: true,
   handler: async ({ mastra, requestContext, knowledgeKey, pageId, noteCursor, noteLimit }) => {
     try {
-      const store = await resolveStore(mastra, requestContext, knowledgeKey);
-      const view = await readKnowledgePage(store, { pageId, read: 'all', noteCursor, noteLimit });
+      const { store, read } = await resolveStore(mastra, requestContext, knowledgeKey);
+      const view = await readKnowledgePage(store, { pageId, read, noteCursor, noteLimit });
       if (!view) throw new HTTPException(404, { message: 'Knowledge page not found' });
       return { ...view };
     } catch (error) {
@@ -163,9 +214,9 @@ export const GET_KNOWLEDGE_GRAPH_ROUTE = createRoute({
   requiresAuth: true,
   handler: async ({ mastra, requestContext, knowledgeKey, rootId, maxPages }) => {
     try {
-      const store = await resolveStore(mastra, requestContext, knowledgeKey);
+      const { store, read } = await resolveStore(mastra, requestContext, knowledgeKey);
       const graph = await readKnowledgePageGraph(store, {
-        read: 'all',
+        read,
         rootId: rootId ?? null,
         ...(maxPages ? { limits: { maxPages } } : {}),
       });
@@ -190,10 +241,10 @@ export const SEARCH_KNOWLEDGE_ROUTE = createRoute({
   requiresAuth: true,
   handler: async ({ mastra, requestContext, knowledgeKey, q, scopeId, limit }) => {
     try {
-      const store = await resolveStore(mastra, requestContext, knowledgeKey);
+      const { store, read } = await resolveStore(mastra, requestContext, knowledgeKey);
       const results = await searchKnowledgeExplorerPages(store, {
         query: q,
-        read: 'all',
+        read,
         ...(scopeId?.length ? { scopeIds: scopeId } : {}),
         limit,
       });
@@ -217,8 +268,8 @@ export const GET_KNOWLEDGE_ACTIVITY_ROUTE = createRoute({
   requiresAuth: true,
   handler: async ({ mastra, requestContext, knowledgeKey, scopeId, pageId, cursor, limit }) => {
     try {
-      const store = await resolveStore(mastra, requestContext, knowledgeKey);
-      return { ...(await readKnowledgePageActivity(store, { read: 'all', scopeId, pageId, cursor, limit })) };
+      const { store, read } = await resolveStore(mastra, requestContext, knowledgeKey);
+      return { ...(await readKnowledgePageActivity(store, { read, scopeId, pageId, cursor, limit })) };
     } catch (error) {
       return handleError(error, 'Error reading Knowledge activity');
     }

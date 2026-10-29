@@ -40,13 +40,40 @@ They mount under your configured API prefix (`/api/knowledge` by default) and ar
 
 ## Access
 
-Studio reads Knowledge as its owner: every route returns every scope, page and note in the instance. Scopes decide what an agent sees during a run. They don't limit Studio.
+What the routes return depends on whether your app configures auth (`server.auth` or `studio.auth`):
 
-That makes access to the routes the boundary. Anyone who passes your auth and holds `knowledge:read` can read the whole instance, so grant it only to people who should see everything stored there.
+- **No auth:** the routes read as the instance owner and return every scope, page and note. This suits a local or test project.
+- **Auth:** the routes return only what the signed-in caller can read. Map each user to Knowledge principals in `authorize` by setting the request context key `MASTRA_KNOWLEDGE_PRINCIPALS_KEY`. The instance turns the principals into a read scope with the same rules agents use. A caller with no mapping gets `403`.
+
+```typescript title="src/mastra/index.ts"
+import { Mastra } from '@mastra/core/mastra'
+import { MASTRA_KNOWLEDGE_PRINCIPALS_KEY } from '@mastra/server/server-adapter'
+
+export const mastra = new Mastra({
+  server: {
+    auth: {
+      // authenticateToken, ...
+      authorize: async (path, method, user, context) => {
+        if (path.startsWith('/api/knowledge')) {
+          context
+            .get('requestContext')
+            .set(
+              MASTRA_KNOWLEDGE_PRINCIPALS_KEY,
+              user.isAdmin ? 'all' : [`org:${user.orgId}`, `team:${user.orgId}:${user.teamId}`],
+            )
+        }
+        return true
+      },
+    },
+  },
+})
+```
+
+Set the value to a string array of principals, or `'all'` for someone who should see the whole instance. An empty array reads nothing. A principal that matches no declared scope type is a configuration error and returns `500`. If you configure `studio.auth`, Studio requests use it instead of `server.auth`, so set the key in that `authorize`.
 
 ## Deployment notes
 
-- **No auth configured:** the routes are open to anyone who can reach the server. Enable them only where Studio itself is private.
-- **No RBAC provider:** the `knowledge:read` check is skipped, so any authenticated user can read every instance.
+- **No auth configured:** the routes are open to anyone who can reach the server and read the whole instance. Enable them only where Studio itself is private.
+- **No RBAC provider:** the `knowledge:read` check is skipped, so any authenticated user with a principal mapping can read the pages those principals cover, in every instance.
 - **With an FGA provider:** `GET /knowledge` lists only the instances the caller can read, and the other routes answer `404` for any other instance.
 - **NestJS:** the NestJS adapter doesn't serve the Knowledge routes yet.

@@ -1,7 +1,7 @@
 import { Mastra } from '@mastra/core';
 import { Knowledge } from '@mastra/core/knowledge';
 import { InMemoryStore } from '@mastra/core/storage';
-import { KNOWLEDGE_ROUTES } from '@mastra/server/server-adapter';
+import { KNOWLEDGE_ROUTES, MASTRA_KNOWLEDGE_PRINCIPALS_KEY } from '@mastra/server/server-adapter';
 import { afterEach, describe, expect, it } from 'vitest';
 
 /**
@@ -22,9 +22,9 @@ export interface KnowledgeRoutesTestSuiteConfig {
 }
 
 /**
- * The opt-in Knowledge routes on every adapter: RBAC `knowledge:read` gates them, `authorize` gets the
- * request context through `context.get('requestContext')`, and a repeated query param (`scopeId`) arrives
- * as a list.
+ * The opt-in Knowledge routes on every adapter: RBAC `knowledge:read` gates them, the Knowledge principals
+ * `authorize` sets through `context.get('requestContext')` reach the handler (no mapping is refused), and a
+ * repeated query param (`scopeId`) arrives as a list.
  */
 export function createKnowledgeRoutesTestSuite(config: KnowledgeRoutesTestSuiteConfig) {
   const { suiteName = 'Knowledge routes', startServer } = config;
@@ -57,8 +57,13 @@ export function createKnowledgeRoutesTestSuite(config: KnowledgeRoutesTestSuiteC
         await store.createPage({ parentId: scope.id, name: page, provenance });
       }
 
-      // Token -> permissions; `authorize` lets a request through only when it can reach the request context.
-      const permissions: Record<string, string[]> = { 'reader-token': ['knowledge:read'], 'other-token': [] };
+      // Token -> permissions. `authorize` maps `reader-token` to every page; `unmapped-token` holds the
+      // permission but gets no Knowledge principals.
+      const permissions: Record<string, string[]> = {
+        'reader-token': ['knowledge:read'],
+        'unmapped-token': ['knowledge:read'],
+        'other-token': [],
+      };
       const mastra = new Mastra({
         logger: false,
         knowledge: { main: knowledge },
@@ -74,8 +79,10 @@ export function createKnowledgeRoutesTestSuite(config: KnowledgeRoutesTestSuiteC
           },
           auth: {
             authenticateToken: async (token: string) => (token in permissions ? { id: token } : null),
-            authorize: async (_path: string, _method: string, _user: unknown, context: any) =>
-              typeof context.get('requestContext')?.get === 'function',
+            authorize: async (_path: string, _method: string, user: { id: string }, context: any) => {
+              if (user.id === 'reader-token') context.get('requestContext').set(MASTRA_KNOWLEDGE_PRINCIPALS_KEY, 'all');
+              return true;
+            },
           },
         }) as any;
 
@@ -86,7 +93,7 @@ export function createKnowledgeRoutesTestSuite(config: KnowledgeRoutesTestSuiteC
       return { get, scopes };
     };
 
-    it('serves a reader with knowledge:read and refuses everyone else', async () => {
+    it('serves a reader authorize mapped to Knowledge principals and refuses everyone else', async () => {
       const { get } = await setup();
 
       const roots = await get('/tree', 'reader-token');
@@ -94,6 +101,7 @@ export function createKnowledgeRoutesTestSuite(config: KnowledgeRoutesTestSuiteC
       const body = (await roots.json()) as { pages: Array<{ name: string }> };
       expect(body.pages.map(page => page.name).sort()).toEqual(['eng', 'sales', 'support']);
 
+      expect((await get('/tree', 'unmapped-token')).status).toBe(403);
       expect((await get('/tree', 'other-token')).status).toBe(403);
       expect((await get('/tree')).status).toBe(401);
     });

@@ -160,14 +160,15 @@ function Explorer({ knowledgeKey, graph }: { knowledgeKey: string; graph: Knowle
           Showing the first {graph.pages.length} pages. Search to reach the rest.
         </p>
       ) : null}
-      <div className="flex min-h-0 flex-1 gap-3">
+      {/* Below lg the row stacks: the selected page sits under the active view so the graph keeps its width. */}
+      <div className="flex min-h-0 flex-1 flex-col gap-3 lg:flex-row">
         <aside
-          className={`min-h-0 w-full overflow-auto rounded border border-border lg:block lg:w-72 lg:shrink-0 ${view === 'tree' ? 'block' : 'hidden'}`}
+          className={`min-h-0 w-full flex-1 overflow-auto rounded border border-border lg:block lg:w-72 lg:flex-none lg:shrink-0 ${view === 'tree' ? 'block' : 'hidden'}`}
         >
           <KnowledgePageTree pages={graph.pages} selectedPageId={selectedPageId} onSelect={page => select(page.id)} />
         </aside>
         <div
-          className={`relative h-full min-h-0 min-w-0 flex-1 lg:block ${view === 'graph' ? 'block' : 'hidden'}`}
+          className={`relative min-h-0 min-w-0 flex-1 lg:block lg:h-full ${view === 'graph' ? 'block' : 'hidden'}`}
           data-testid="knowledge-graph-container"
         >
           <KnowledgePageGraph
@@ -181,7 +182,7 @@ function Explorer({ knowledgeKey, graph }: { knowledgeKey: string; graph: Knowle
         {selectedPageId ? (
           <section
             aria-label="Selected page"
-            className="min-h-0 w-full overflow-auto rounded border border-border lg:w-96 lg:shrink-0"
+            className="max-h-[45%] min-h-0 w-full shrink-0 overflow-auto rounded border border-border lg:max-h-none lg:w-96"
           >
             <SelectedPage
               knowledgeKey={knowledgeKey}

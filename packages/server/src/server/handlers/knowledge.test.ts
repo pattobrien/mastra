@@ -3,6 +3,7 @@ import { Mastra } from '@mastra/core/mastra';
 import { RequestContext } from '@mastra/core/request-context';
 import { InMemoryStore } from '@mastra/core/storage';
 import { describe, expect, it, vi } from 'vitest';
+import { MASTRA_KNOWLEDGE_PRINCIPALS_KEY } from '../constants';
 import { HTTPException } from '../http-exception';
 import { knowledgeActivityQuerySchema, knowledgeSearchQuerySchema } from '../schemas/knowledge';
 import { deriveAction, extractResource } from '../server-adapter/routes/permissions';
@@ -169,5 +170,117 @@ describe('Knowledge read routes', () => {
       expect(route.requiresAuth).toBe(true);
       expect(`${extractResource(route.path)}:${deriveAction(route.method, route.path)}`).toBe('knowledge:read');
     }
+  });
+});
+
+describe('Knowledge read routes with app auth', () => {
+  /**
+   * Stands in for `Knowledge.readScopeFor` (landing with the schema-4 Knowledge class): each team principal
+   * reads its own team scope by address, and `org:acme` reads the org scope.
+   */
+  async function setupWithAuth() {
+    const ctx = await setup();
+    const knowledge = ctx.mastra.listKnowledge().main as unknown as Record<string, unknown>;
+    knowledge.readScopeFor = vi.fn(async (principals: string[]) => {
+      if (principals.includes('unknown:x')) {
+        throw Object.assign(new Error('Knowledge run scope "unknown:x" does not match a declared scope type.'), {
+          name: 'KnowledgeDeclarationError',
+        });
+      }
+      return { addresses: principals, prefixes: [], children: [] };
+    });
+    (ctx.mastra as any).getServer = () => ({ auth: { authenticateToken: async () => ({ id: 'u1' }) } });
+    return { ...ctx, readScopeFor: knowledge.readScopeFor as ReturnType<typeof vi.fn> };
+  }
+
+  const asCaller = (principals: unknown) => {
+    const requestContext = new RequestContext();
+    requestContext.set('user', { id: 'u1' });
+    if (principals !== undefined) requestContext.set(MASTRA_KNOWLEDGE_PRINCIPALS_KEY, principals);
+    return requestContext;
+  };
+
+  it('refuses a signed-in caller the app has not mapped to principals', async () => {
+    const { mastra } = await setupWithAuth();
+    for (const route of [
+      GET_KNOWLEDGE_TREE_ROUTE,
+      GET_KNOWLEDGE_GRAPH_ROUTE,
+      SEARCH_KNOWLEDGE_ROUTE,
+      GET_KNOWLEDGE_ACTIVITY_ROUTE,
+    ]) {
+      await expect(
+        call(route, { mastra, requestContext: asCaller(undefined), knowledgeKey: 'main', q: 'refunds' }),
+      ).rejects.toMatchObject({ status: 403 });
+    }
+  });
+
+  it('refuses when auth is configured only for Studio', async () => {
+    const { mastra } = await setup();
+    (mastra as any).getStudio = () => ({ auth: {} });
+    await expect(
+      call(GET_KNOWLEDGE_GRAPH_ROUTE, { mastra, requestContext: asCaller(undefined), knowledgeKey: 'main' }),
+    ).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("reads only the pages the caller's principals can read", async () => {
+    const { mastra, readScopeFor } = await setupWithAuth();
+    const requestContext = asCaller(['team:acme:support']);
+    const graph = await call(GET_KNOWLEDGE_GRAPH_ROUTE, { mastra, requestContext, knowledgeKey: 'main' });
+    expect(names(graph.pages).sort()).toEqual(['Refunds', 'Support']);
+    expect(graph.pinnedIds).toEqual([]);
+    expect(readScopeFor).toHaveBeenCalledWith(['team:acme:support']);
+
+    const search = await call(SEARCH_KNOWLEDGE_ROUTE, { mastra, requestContext, knowledgeKey: 'main', q: 'roadmap' });
+    expect(search.results.map((hit: { page: { name: string } }) => hit.page.name)).not.toContain('Roadmap');
+  });
+
+  it('404s a page outside what the caller can read', async () => {
+    const { mastra, roadmap } = await setupWithAuth();
+    await expect(
+      call(GET_KNOWLEDGE_PAGE_ROUTE, {
+        mastra,
+        requestContext: asCaller(['team:acme:support']),
+        knowledgeKey: 'main',
+        pageId: roadmap.id,
+      }),
+    ).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("reads everything for a caller the app maps to 'all'", async () => {
+    const { mastra, readScopeFor } = await setupWithAuth();
+    const graph = await call(GET_KNOWLEDGE_GRAPH_ROUTE, {
+      mastra,
+      requestContext: asCaller('all'),
+      knowledgeKey: 'main',
+    });
+    expect(names(graph.pages).sort()).toEqual(['Acme', 'Engineering', 'Refunds', 'Roadmap', 'Support']);
+    expect(readScopeFor).not.toHaveBeenCalled();
+  });
+
+  it('reads nothing for a caller mapped to no principals', async () => {
+    const { mastra } = await setupWithAuth();
+    const graph = await call(GET_KNOWLEDGE_GRAPH_ROUTE, { mastra, requestContext: asCaller([]), knowledgeKey: 'main' });
+    expect(graph.pages).toEqual([]);
+  });
+
+  it('reports a malformed mapping or an undeclared principal as a server misconfiguration', async () => {
+    const { mastra } = await setupWithAuth();
+    for (const principals of ['team:acme:support', [1], ['unknown:x']]) {
+      await expect(
+        call(GET_KNOWLEDGE_GRAPH_ROUTE, { mastra, requestContext: asCaller(principals), knowledgeKey: 'main' }),
+      ).rejects.toMatchObject({ status: 500 });
+    }
+  });
+
+  it('says so when the instance cannot resolve principals yet', async () => {
+    const { mastra } = await setup();
+    (mastra as any).getServer = () => ({ auth: {} });
+    await expect(
+      call(GET_KNOWLEDGE_GRAPH_ROUTE, {
+        mastra,
+        requestContext: asCaller(['team:acme:support']),
+        knowledgeKey: 'main',
+      }),
+    ).rejects.toMatchObject({ status: 501 });
   });
 });
