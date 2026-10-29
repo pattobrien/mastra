@@ -182,7 +182,7 @@ type InputShared_Auxiliary_278 =
           };
     };
 
-type InputShared_Auxiliary_715 =
+type InputShared_Auxiliary_717 =
   | {
       op: 'eq' | 'ne' | 'lt' | 'lte' | 'gt' | 'gte';
       left:
@@ -227,19 +227,19 @@ type InputShared_Auxiliary_715 =
     }
   | {
       op: 'and' | 'or';
-      args: InputShared_Auxiliary_715[];
+      args: InputShared_Auxiliary_717[];
     }
   | {
       op: 'not';
-      arg: InputShared_Auxiliary_715;
+      arg: InputShared_Auxiliary_717;
     };
 
-type InputShared_Auxiliary_789 = {
+type InputShared_Auxiliary_791 = {
   id?: string | undefined;
   name: string;
   type: 'file' | 'folder';
   content?: string | undefined;
-  children?: InputShared_Auxiliary_789[] | undefined;
+  children?: InputShared_Auxiliary_791[] | undefined;
 };
 
 type Shared_Auxiliary_780 = {
@@ -1833,7 +1833,7 @@ type InputShared_Type_89 = {
       }
     | undefined;
   steps: InputShared_Type_84[];
-  predicates: InputShared_Auxiliary_715[];
+  predicates: InputShared_Auxiliary_717[];
 };
 
 type InputShared_Type_90 = {
@@ -1847,7 +1847,7 @@ type InputShared_Type_90 = {
     | undefined;
   step: InputShared_Type_84;
   loopType: 'dowhile' | 'dountil';
-  predicate: InputShared_Auxiliary_715;
+  predicate: InputShared_Auxiliary_717;
 };
 
 type InputShared_Type_91 =
@@ -13142,21 +13142,93 @@ export interface GetKnowledge_RouteContract {
 }
 
 // ============================================================================
-// Route: GET /knowledge/:knowledgeKey/graph
+// Route: GET /knowledge/:knowledgeKey/tree
 // ============================================================================
-export type GetKnowledgeKnowledgeKeyGraph_PathParams = {
+export type GetKnowledgeKnowledgeKeyTree_PathParams = {
   /** Application key the Knowledge instance is registered under */
   knowledgeKey: string;
 };
 
-export type GetKnowledgeKnowledgeKeyGraph_QueryParams = {
-  /** Scope tags the viewer holds. A record is visible when all of its tags are in this set. */
-  scope: string | string[];
+export type GetKnowledgeKnowledgeKeyTree_QueryParams = {
+  /** Page whose children to list; omit for the root scopes */
+  parentId?: string | undefined;
+  cursor?: string | undefined;
+  limit?: number | undefined;
 };
 
-export type GetKnowledgeKnowledgeKeyGraph_Response = {
+export type GetKnowledgeKnowledgeKeyTree_Response = {
   [key: string]: unknown;
 };
+
+export type GetKnowledgeKnowledgeKeyTree_Request = Simplify<
+  (GetKnowledgeKnowledgeKeyTree_PathParams extends never ? {} : { params: GetKnowledgeKnowledgeKeyTree_PathParams }) &
+    (GetKnowledgeKnowledgeKeyTree_QueryParams extends never
+      ? {}
+      : {} extends GetKnowledgeKnowledgeKeyTree_QueryParams
+        ? { query?: GetKnowledgeKnowledgeKeyTree_QueryParams }
+        : { query: GetKnowledgeKnowledgeKeyTree_QueryParams }) &
+    (never extends never ? {} : {} extends never ? { body?: never } : { body: never })
+>;
+
+export interface GetKnowledgeKnowledgeKeyTree_RouteContract {
+  pathParams: GetKnowledgeKnowledgeKeyTree_PathParams;
+  queryParams: GetKnowledgeKnowledgeKeyTree_QueryParams;
+  body: never;
+  request: GetKnowledgeKnowledgeKeyTree_Request;
+  response: GetKnowledgeKnowledgeKeyTree_Response;
+  responseType: 'json';
+}
+
+// ============================================================================
+// Route: GET /knowledge/:knowledgeKey/pages/:pageId
+// ============================================================================
+export type GetKnowledgeKnowledgeKeyPagesPageId_PathParams = {
+  /** Application key the Knowledge instance is registered under */
+  knowledgeKey: string;
+  /** Knowledge page id */
+  pageId: string;
+};
+
+export type GetKnowledgeKnowledgeKeyPagesPageId_QueryParams = {
+  noteCursor?: string | undefined;
+  noteLimit?: number | undefined;
+};
+
+export type GetKnowledgeKnowledgeKeyPagesPageId_Response = GetKnowledgeKnowledgeKeyTree_Response;
+
+export type GetKnowledgeKnowledgeKeyPagesPageId_Request = Simplify<
+  (GetKnowledgeKnowledgeKeyPagesPageId_PathParams extends never
+    ? {}
+    : { params: GetKnowledgeKnowledgeKeyPagesPageId_PathParams }) &
+    (GetKnowledgeKnowledgeKeyPagesPageId_QueryParams extends never
+      ? {}
+      : {} extends GetKnowledgeKnowledgeKeyPagesPageId_QueryParams
+        ? { query?: GetKnowledgeKnowledgeKeyPagesPageId_QueryParams }
+        : { query: GetKnowledgeKnowledgeKeyPagesPageId_QueryParams }) &
+    (never extends never ? {} : {} extends never ? { body?: never } : { body: never })
+>;
+
+export interface GetKnowledgeKnowledgeKeyPagesPageId_RouteContract {
+  pathParams: GetKnowledgeKnowledgeKeyPagesPageId_PathParams;
+  queryParams: GetKnowledgeKnowledgeKeyPagesPageId_QueryParams;
+  body: never;
+  request: GetKnowledgeKnowledgeKeyPagesPageId_Request;
+  response: GetKnowledgeKnowledgeKeyPagesPageId_Response;
+  responseType: 'json';
+}
+
+// ============================================================================
+// Route: GET /knowledge/:knowledgeKey/graph
+// ============================================================================
+export type GetKnowledgeKnowledgeKeyGraph_PathParams = GetKnowledgeKnowledgeKeyTree_PathParams;
+
+export type GetKnowledgeKnowledgeKeyGraph_QueryParams = {
+  /** Page to walk from; omit to walk every root scope */
+  rootId?: string | undefined;
+  maxPages?: number | undefined;
+};
+
+export type GetKnowledgeKnowledgeKeyGraph_Response = GetKnowledgeKnowledgeKeyTree_Response;
 
 export type GetKnowledgeKnowledgeKeyGraph_Request = Simplify<
   (GetKnowledgeKnowledgeKeyGraph_PathParams extends never ? {} : { params: GetKnowledgeKnowledgeKeyGraph_PathParams }) &
@@ -13178,57 +13250,22 @@ export interface GetKnowledgeKnowledgeKeyGraph_RouteContract {
 }
 
 // ============================================================================
-// Route: GET /knowledge/:knowledgeKey/nodes/:nodeId
-// ============================================================================
-export type GetKnowledgeKnowledgeKeyNodesNodeId_PathParams = {
-  /** Application key the Knowledge instance is registered under */
-  knowledgeKey: string;
-  /** Knowledge node id */
-  nodeId: string;
-};
-
-export type GetKnowledgeKnowledgeKeyNodesNodeId_QueryParams = GetKnowledgeKnowledgeKeyGraph_QueryParams;
-
-export type GetKnowledgeKnowledgeKeyNodesNodeId_Response = GetKnowledgeKnowledgeKeyGraph_Response;
-
-export type GetKnowledgeKnowledgeKeyNodesNodeId_Request = Simplify<
-  (GetKnowledgeKnowledgeKeyNodesNodeId_PathParams extends never
-    ? {}
-    : { params: GetKnowledgeKnowledgeKeyNodesNodeId_PathParams }) &
-    (GetKnowledgeKnowledgeKeyNodesNodeId_QueryParams extends never
-      ? {}
-      : {} extends GetKnowledgeKnowledgeKeyNodesNodeId_QueryParams
-        ? { query?: GetKnowledgeKnowledgeKeyNodesNodeId_QueryParams }
-        : { query: GetKnowledgeKnowledgeKeyNodesNodeId_QueryParams }) &
-    (never extends never ? {} : {} extends never ? { body?: never } : { body: never })
->;
-
-export interface GetKnowledgeKnowledgeKeyNodesNodeId_RouteContract {
-  pathParams: GetKnowledgeKnowledgeKeyNodesNodeId_PathParams;
-  queryParams: GetKnowledgeKnowledgeKeyNodesNodeId_QueryParams;
-  body: never;
-  request: GetKnowledgeKnowledgeKeyNodesNodeId_Request;
-  response: GetKnowledgeKnowledgeKeyNodesNodeId_Response;
-  responseType: 'json';
-}
-
-// ============================================================================
 // Route: GET /knowledge/:knowledgeKey/search
 // ============================================================================
-export type GetKnowledgeKnowledgeKeySearch_PathParams = GetKnowledgeKnowledgeKeyGraph_PathParams;
+export type GetKnowledgeKnowledgeKeySearch_PathParams = GetKnowledgeKnowledgeKeyTree_PathParams;
 
 export type GetKnowledgeKnowledgeKeySearch_QueryParams = {
-  /** Scope tags the viewer holds. A record is visible when all of its tags are in this set. */
-  scope: string | string[];
-  /** Case-insensitive name search; shorter than 2 characters returns nothing */
+  /** Text to match in page names, synopses, bodies and notes */
   q: string;
+  /** Only pages within these scopes */
+  scopeId?: (string | string[]) | undefined;
+  limit?: number | undefined;
 };
 
 export type GetKnowledgeKnowledgeKeySearch_Response = {
   results: {
     [key: string]: unknown;
   }[];
-  truncated: boolean;
 };
 
 export type GetKnowledgeKnowledgeKeySearch_Request = Simplify<
@@ -13255,16 +13292,16 @@ export interface GetKnowledgeKnowledgeKeySearch_RouteContract {
 // ============================================================================
 // Route: GET /knowledge/:knowledgeKey/activity
 // ============================================================================
-export type GetKnowledgeKnowledgeKeyActivity_PathParams = GetKnowledgeKnowledgeKeyGraph_PathParams;
+export type GetKnowledgeKnowledgeKeyActivity_PathParams = GetKnowledgeKnowledgeKeyTree_PathParams;
 
 export type GetKnowledgeKnowledgeKeyActivity_QueryParams = {
-  /** Scope tags the viewer holds. A record is visible when all of its tags are in this set. */
-  scope: string | string[];
+  scopeId?: string | undefined;
+  pageId?: string | undefined;
   cursor?: string | undefined;
   limit?: number | undefined;
 };
 
-export type GetKnowledgeKnowledgeKeyActivity_Response = GetKnowledgeKnowledgeKeyGraph_Response;
+export type GetKnowledgeKnowledgeKeyActivity_Response = GetKnowledgeKnowledgeKeyTree_Response;
 
 export type GetKnowledgeKnowledgeKeyActivity_Request = Simplify<
   (GetKnowledgeKnowledgeKeyActivity_PathParams extends never
@@ -19187,7 +19224,7 @@ export type PostStoredSkills_Body = {
   /** List of asset file paths */
   assets?: string[] | undefined;
   /** Full file tree structure for the skill */
-  files?: InputShared_Auxiliary_789[] | undefined;
+  files?: InputShared_Auxiliary_791[] | undefined;
   /** Additional metadata for the skill */
   metadata?:
     | {
@@ -19245,7 +19282,7 @@ export type PatchStoredSkillsStoredSkillId_Body = {
   /** List of asset file paths */
   assets?: (string[] | undefined) | undefined;
   /** Full file tree structure for the skill */
-  files?: (InputShared_Auxiliary_789[] | undefined) | undefined;
+  files?: (InputShared_Auxiliary_791[] | undefined) | undefined;
   /** Additional metadata for the skill */
   metadata?:
     | (
@@ -19536,7 +19573,7 @@ export type GetToolProvidersProviderIdToolsToolSlugSchema_PathParams = {
   toolSlug: string;
 };
 
-export type GetToolProvidersProviderIdToolsToolSlugSchema_Response = GetKnowledgeKnowledgeKeyGraph_Response;
+export type GetToolProvidersProviderIdToolsToolSlugSchema_Response = GetKnowledgeKnowledgeKeyTree_Response;
 
 export type GetToolProvidersProviderIdToolsToolSlugSchema_Request = Simplify<
   (GetToolProvidersProviderIdToolsToolSlugSchema_PathParams extends never
@@ -24956,8 +24993,9 @@ export interface RouteTypes {
   'GET /vectors': GetVectors_RouteContract;
   'GET /embedders': GetEmbedders_RouteContract;
   'GET /knowledge': GetKnowledge_RouteContract;
+  'GET /knowledge/:knowledgeKey/tree': GetKnowledgeKnowledgeKeyTree_RouteContract;
+  'GET /knowledge/:knowledgeKey/pages/:pageId': GetKnowledgeKnowledgeKeyPagesPageId_RouteContract;
   'GET /knowledge/:knowledgeKey/graph': GetKnowledgeKnowledgeKeyGraph_RouteContract;
-  'GET /knowledge/:knowledgeKey/nodes/:nodeId': GetKnowledgeKnowledgeKeyNodesNodeId_RouteContract;
   'GET /knowledge/:knowledgeKey/search': GetKnowledgeKnowledgeKeySearch_RouteContract;
   'GET /knowledge/:knowledgeKey/activity': GetKnowledgeKnowledgeKeyActivity_RouteContract;
   'GET /.well-known/:agentId/agent-card.json': GetWellKnownAgentIdAgentCardJson_RouteContract;
@@ -25691,11 +25729,14 @@ export interface Client {
   '/knowledge/:knowledgeKey/graph': {
     GET: GetKnowledgeKnowledgeKeyGraph_RouteContract;
   };
-  '/knowledge/:knowledgeKey/nodes/:nodeId': {
-    GET: GetKnowledgeKnowledgeKeyNodesNodeId_RouteContract;
+  '/knowledge/:knowledgeKey/pages/:pageId': {
+    GET: GetKnowledgeKnowledgeKeyPagesPageId_RouteContract;
   };
   '/knowledge/:knowledgeKey/search': {
     GET: GetKnowledgeKnowledgeKeySearch_RouteContract;
+  };
+  '/knowledge/:knowledgeKey/tree': {
+    GET: GetKnowledgeKnowledgeKeyTree_RouteContract;
   };
   '/logs': {
     GET: GetLogs_RouteContract;

@@ -1,10 +1,10 @@
-import { createKnowledgeScopeBindingTestSuite } from '@mastra/server-adapters-test-suite';
+import { createKnowledgeRoutesTestSuite } from '@mastra/server-adapters-test-suite';
 import Fastify from 'fastify';
 
 import { MastraServer } from '../index';
 
-createKnowledgeScopeBindingTestSuite({
-  suiteName: 'Fastify Knowledge scope binding',
+createKnowledgeRoutesTestSuite({
+  suiteName: 'Fastify Knowledge routes',
   startServer: async mastra => {
     const app = Fastify({ logger: false });
     await new MastraServer({ app, mastra }).init();

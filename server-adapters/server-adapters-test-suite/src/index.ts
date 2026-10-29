@@ -23,6 +23,6 @@ export {
   consumeSSEStream,
 } from './test-helpers';
 export {
-  createKnowledgeScopeBindingTestSuite,
-  type KnowledgeScopeBindingTestSuiteConfig,
-} from './knowledge-scope-binding-test-suite';
+  createKnowledgeRoutesTestSuite,
+  type KnowledgeRoutesTestSuiteConfig,
+} from './knowledge-routes-test-suite';

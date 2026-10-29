@@ -2,7 +2,7 @@
 'mastra': minor
 ---
 
-Added a Knowledge page to Mastra Studio that browses a Knowledge instance registered on the server: choose the instance and the scope tags to view through, then explore the graph, open nodes and their records, and search by name.
+Added a Knowledge page to Mastra Studio that browses a Knowledge instance registered on the server. It shows every scope and page as a tree beside a graph of the same pages, opens a selected page with its notes and pin, and searches pages and notes. On narrow screens a toggle switches between the tree and the graph.
 
 The page needs the Knowledge routes, which are not served by default. Register them on your Mastra instance:
 

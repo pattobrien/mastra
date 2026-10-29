@@ -3,47 +3,55 @@ import { Mastra } from '@mastra/core/mastra';
 import { RequestContext } from '@mastra/core/request-context';
 import { InMemoryStore } from '@mastra/core/storage';
 import { describe, expect, it, vi } from 'vitest';
-import { MASTRA_KNOWLEDGE_SCOPE_KEY, isReservedRequestContextKey } from '../constants';
 import { HTTPException } from '../http-exception';
-import { knowledgeActivityQuerySchema, knowledgeViewQuerySchema } from '../schemas/knowledge';
+import { knowledgeActivityQuerySchema, knowledgeSearchQuerySchema } from '../schemas/knowledge';
 import { deriveAction, extractResource } from '../server-adapter/routes/permissions';
 import {
   GET_KNOWLEDGE_ACTIVITY_ROUTE,
   GET_KNOWLEDGE_GRAPH_ROUTE,
-  GET_KNOWLEDGE_NODE_ROUTE,
+  GET_KNOWLEDGE_PAGE_ROUTE,
+  GET_KNOWLEDGE_TREE_ROUTE,
   LIST_KNOWLEDGE_ROUTE,
   SEARCH_KNOWLEDGE_ROUTE,
 } from './knowledge';
 
-const org = ['org:acme'];
-const team = ['org:acme', 'team:acme:x'];
+const provenance = { author: 'agent:alex' };
 
+/** org:acme ─┬─ team:acme:support ─ Refunds (note mentions Roadmap)
+ *            └─ team:acme:eng ─ Roadmap (pinned) */
 async function setup() {
   const knowledge = new Knowledge({ id: 'kb', storage: new InMemoryStore({ id: 'kb' }) });
   const store = await knowledge.getStorage();
-  const payments = await store.createNode({ name: 'Payments', kind: 'service', scope: org });
-  const secret = await store.createNode({ name: 'Secret', kind: 'doc', scope: team });
-  await store.appendKnowledge({
-    node: payments.id,
-    text: 'Payments is documented.',
-    scope: org,
-    sourceThreadId: 't1',
-    resolutionScope: org,
-    defaultScope: org,
+  const acme = (await store.materializeScope({ address: 'org:acme', declaration: 'org:$orgId', name: 'Acme', provenance }))
+    .scope;
+  const scope = async (address: string, name: string) =>
+    (
+      await store.materializeScope({
+        address,
+        declaration: 'team:$orgId:$teamId',
+        name,
+        parentId: acme.id,
+        provenance,
+      })
+    ).scope;
+  const support = await scope('team:acme:support', 'Support');
+  const eng = await scope('team:acme:eng', 'Engineering');
+  const refunds = await store.createPage({ parentId: support.id, name: 'Refunds', provenance });
+  const roadmap = await store.createPage({ parentId: eng.id, name: 'Roadmap', provenance });
+  await store.addNote({
+    pageId: refunds.id,
+    text: 'Refund tooling ships with [[Roadmap]]',
+    stampScopeIds: [support.id, eng.id],
+    mentions: [roadmap.id],
+    provenance,
   });
-  await store.appendKnowledge({
-    node: secret.id,
-    text: 'Team-only note.',
-    scope: team,
-    sourceThreadId: 't2',
-    resolutionScope: team,
-    defaultScope: team,
-  });
+  await store.addPinAudience({ pageId: roadmap.id, audience: ['team:acme:eng'], createdBy: 'host' });
   const mastra = new Mastra({ logger: false, knowledge: { main: knowledge } });
-  return { mastra, payments, secret };
+  return { mastra, acme, support, eng, refunds, roadmap };
 }
 
 const call = (route: { handler: (args: any) => Promise<any> }, args: Record<string, unknown>) => route.handler(args);
+const names = (pages: Array<{ name: string }>) => pages.map(page => page.name);
 
 describe('Knowledge read routes', () => {
   it('lists registered instances by key', async () => {
@@ -51,78 +59,67 @@ describe('Knowledge read routes', () => {
     expect(await call(LIST_KNOWLEDGE_ROUTE, { mastra })).toEqual({ instances: [{ key: 'main', id: 'kb' }] });
   });
 
-  it('shows only what the given scope tags can see', async () => {
-    const { mastra, payments, secret } = await setup();
-    const orgView = await call(GET_KNOWLEDGE_GRAPH_ROUTE, { mastra, knowledgeKey: 'main', scope: org });
-    expect(orgView.nodes.map((n: { name: string }) => n.name)).toEqual(['Payments']);
-    const teamView = await call(GET_KNOWLEDGE_GRAPH_ROUTE, { mastra, knowledgeKey: 'main', scope: team });
-    expect(teamView.nodes.map((n: { name: string }) => n.name).sort()).toEqual(['Payments', 'Secret']);
+  it('reads the whole tree as the owner, one level at a time', async () => {
+    const { mastra, acme, support } = await setup();
+    const args = { mastra, knowledgeKey: 'main' };
+    expect(names((await call(GET_KNOWLEDGE_TREE_ROUTE, args)).pages)).toEqual(['Acme']);
+    expect(names((await call(GET_KNOWLEDGE_TREE_ROUTE, { ...args, parentId: acme.id })).pages)).toEqual([
+      'Support',
+      'Engineering',
+    ]);
+    expect(names((await call(GET_KNOWLEDGE_TREE_ROUTE, { ...args, parentId: support.id })).pages)).toEqual([
+      'Refunds',
+    ]);
+  });
 
-    const node = await call(GET_KNOWLEDGE_NODE_ROUTE, {
-      mastra,
-      knowledgeKey: 'main',
-      nodeId: payments.id,
-      scope: org,
-    });
-    expect(node.node.name).toBe('Payments');
-    // A node id from a wider scope is a 404 from a narrower view, not a read.
+  it('returns a page with ancestors, notes, references and pin, and 404s an unknown page', async () => {
+    const { mastra, refunds, roadmap } = await setup();
+    const args = { mastra, knowledgeKey: 'main' };
+    const page = await call(GET_KNOWLEDGE_PAGE_ROUTE, { ...args, pageId: refunds.id });
+    expect(names(page.ancestors)).toEqual(['Acme', 'Support']);
+    expect(page.notes.map((note: { text: string }) => note.text)).toEqual(['Refund tooling ships with [[Roadmap]]']);
+    expect(names(page.related)).toContain('Roadmap');
+    expect((await call(GET_KNOWLEDGE_PAGE_ROUTE, { ...args, pageId: roadmap.id })).pin.audience).toEqual([
+      'team:acme:eng',
+    ]);
+    await expect(call(GET_KNOWLEDGE_PAGE_ROUTE, { ...args, pageId: 'missing' })).rejects.toMatchObject({ status: 404 });
+  });
+
+  it('returns the bounded page graph with parent and mention edges across scopes', async () => {
+    const { mastra, refunds, roadmap, support } = await setup();
+    const graph = await call(GET_KNOWLEDGE_GRAPH_ROUTE, { mastra, knowledgeKey: 'main' });
+    expect(names(graph.pages).sort()).toEqual(['Acme', 'Engineering', 'Refunds', 'Roadmap', 'Support']);
+    expect(graph.edges).toContainEqual({ source: support.id, target: refunds.id, kind: 'parent' });
+    expect(graph.edges).toContainEqual({ source: refunds.id, target: roadmap.id, kind: 'mention', count: 1 });
+    expect(graph.pinnedIds).toEqual([roadmap.id]);
+    const small = await call(GET_KNOWLEDGE_GRAPH_ROUTE, { mastra, knowledgeKey: 'main', maxPages: 2 });
+    expect(small.truncated).toBe(true);
     await expect(
-      call(GET_KNOWLEDGE_NODE_ROUTE, { mastra, knowledgeKey: 'main', nodeId: secret.id, scope: org }),
+      call(GET_KNOWLEDGE_GRAPH_ROUTE, { mastra, knowledgeKey: 'main', rootId: 'missing' }),
     ).rejects.toMatchObject({ status: 404 });
   });
 
-  it('searches and pages activity inside the view only', async () => {
-    const { mastra } = await setup();
-    const found = await call(SEARCH_KNOWLEDGE_ROUTE, { mastra, knowledgeKey: 'main', scope: org, q: 'sec' });
-    expect(found.results).toEqual([]);
-    const wide = await call(SEARCH_KNOWLEDGE_ROUTE, { mastra, knowledgeKey: 'main', scope: team, q: 'sec' });
-    expect(wide.results.map((r: { name: string }) => r.name)).toEqual(['Secret']);
-    const activity = await call(GET_KNOWLEDGE_ACTIVITY_ROUTE, { mastra, knowledgeKey: 'main', scope: org });
-    expect(activity.events.length).toBeGreaterThan(0);
-    expect(activity.events.every((e: { scope: string[] }) => e.scope.every(tag => org.includes(tag)))).toBe(true);
+  it('searches every scope, or only the given scopes, and pages activity', async () => {
+    const { mastra, support, eng } = await setup();
+    const args = { mastra, knowledgeKey: 'main' };
+    const all = await call(SEARCH_KNOWLEDGE_ROUTE, { ...args, q: 'roadmap' });
+    expect(all.results.map((hit: { page: { name: string } }) => hit.page.name)).toContain('Roadmap');
+    const narrowed = await call(SEARCH_KNOWLEDGE_ROUTE, { ...args, q: 'roadmap', scopeId: [eng.id] });
+    expect(narrowed.results.every((hit: { page: { scopeId: string } }) => hit.page.scopeId === eng.id)).toBe(true);
+    const supportOnly = await call(SEARCH_KNOWLEDGE_ROUTE, { ...args, q: 'refunds', scopeId: [support.id] });
+    expect(supportOnly.results.length).toBeGreaterThan(0);
+
+    const first = await call(GET_KNOWLEDGE_ACTIVITY_ROUTE, { ...args, limit: 2 });
+    expect(first.events).toHaveLength(2);
+    const next = await call(GET_KNOWLEDGE_ACTIVITY_ROUTE, { ...args, limit: 2, cursor: first.nextCursor });
+    expect(next.events[0].id).not.toBe(first.events[0].id);
   });
 
-  it('404s an unknown instance and 400s an invalid scope', async () => {
+  it('404s an unknown instance', async () => {
     const { mastra } = await setup();
-    await expect(call(GET_KNOWLEDGE_GRAPH_ROUTE, { mastra, knowledgeKey: 'nope', scope: org })).rejects.toBeInstanceOf(
+    await expect(call(GET_KNOWLEDGE_TREE_ROUTE, { mastra, knowledgeKey: 'nope' })).rejects.toBeInstanceOf(
       HTTPException,
     );
-    await expect(
-      call(GET_KNOWLEDGE_GRAPH_ROUTE, {
-        mastra,
-        knowledgeKey: 'main',
-        scope: Array.from({ length: 9 }, (_, i) => `t${i}:x`),
-      }),
-    ).rejects.toMatchObject({ status: 400 });
-  });
-
-  it('keeps a request inside the scope the app set for the caller', async () => {
-    const { mastra } = await setup();
-    const requestContext = new RequestContext();
-    requestContext.set(MASTRA_KNOWLEDGE_SCOPE_KEY, org);
-    const args = { mastra, requestContext, knowledgeKey: 'main' };
-    expect((await call(GET_KNOWLEDGE_GRAPH_ROUTE, { ...args, scope: org })).nodes).toHaveLength(1);
-    await expect(call(GET_KNOWLEDGE_GRAPH_ROUTE, { ...args, scope: team })).rejects.toMatchObject({ status: 403 });
-    await expect(call(SEARCH_KNOWLEDGE_ROUTE, { ...args, scope: team, q: 'sec' })).rejects.toMatchObject({
-      status: 403,
-    });
-    await expect(call(GET_KNOWLEDGE_GRAPH_ROUTE, { ...args, scope: ['org:acme', 'org:other'] })).rejects.toMatchObject({
-      status: 403,
-      message: expect.stringContaining('org:other'),
-    });
-    // An empty allowed set means no tags: nothing can be requested.
-    requestContext.set(MASTRA_KNOWLEDGE_SCOPE_KEY, []);
-    await expect(call(GET_KNOWLEDGE_GRAPH_ROUTE, { ...args, scope: org })).rejects.toMatchObject({ status: 403 });
-  });
-
-  it('treats a malformed established scope as a 400 and reserves the key from request bodies', async () => {
-    const { mastra } = await setup();
-    const requestContext = new RequestContext();
-    requestContext.set(MASTRA_KNOWLEDGE_SCOPE_KEY, 'org:acme');
-    await expect(
-      call(GET_KNOWLEDGE_GRAPH_ROUTE, { mastra, requestContext, knowledgeKey: 'main', scope: org }),
-    ).rejects.toMatchObject({ status: 400 });
-    expect(isReservedRequestContextKey(MASTRA_KNOWLEDGE_SCOPE_KEY)).toBe(true);
   });
 
   it('filters instances and gates reads by FGA when configured', async () => {
@@ -136,63 +133,36 @@ describe('Knowledge read routes', () => {
     expect(await call(LIST_KNOWLEDGE_ROUTE, { mastra, requestContext })).toEqual({ instances: [] });
     expect(filterAccessible.mock.calls[0]![2]).toBe('knowledge');
     expect(filterAccessible.mock.calls[0]![3]).toBe('knowledge:read');
-    await expect(
-      call(GET_KNOWLEDGE_GRAPH_ROUTE, { mastra, requestContext, knowledgeKey: 'main', scope: org }),
-    ).rejects.toMatchObject({ status: 404 });
+    for (const route of [GET_KNOWLEDGE_TREE_ROUTE, GET_KNOWLEDGE_GRAPH_ROUTE, GET_KNOWLEDGE_ACTIVITY_ROUTE]) {
+      await expect(call(route, { mastra, requestContext, knowledgeKey: 'main' })).rejects.toMatchObject({
+        status: 404,
+      });
+    }
 
-    // A provider that allows the instance reads it (check, the real IFGAProvider method).
     const check = vi.fn(async () => true);
     (mastra as any).getServer = () => ({ fga: { filterAccessible, check } });
-    requestContext.set(MASTRA_KNOWLEDGE_SCOPE_KEY, org);
-    const graph = await call(GET_KNOWLEDGE_GRAPH_ROUTE, { mastra, requestContext, knowledgeKey: 'main', scope: org });
-    expect(graph).toBeDefined();
+    expect(names((await call(GET_KNOWLEDGE_TREE_ROUTE, { mastra, requestContext, knowledgeKey: 'main' })).pages)).toEqual(
+      ['Acme'],
+    );
     expect(check).toHaveBeenCalledWith(
       { id: 'u1' },
-      { resource: { type: 'knowledge', id: expect.any(String) }, permission: 'knowledge:read' },
+      { resource: { type: 'knowledge', id: 'kb' }, permission: 'knowledge:read' },
     );
   });
 
-  it('refuses an unbound scope when RBAC or FGA is configured, and trusts it when neither is', async () => {
-    const rbac = { getRoles: async () => [], getPermissions: async () => ['knowledge:read'] };
-    const fga = { check: async () => true, filterAccessible: async (_u: unknown, items: unknown[]) => items };
-    for (const config of [{ server: { rbac } }, { server: { fga } }, { studio: { rbac } }, { studio: { fga } }]) {
-      const { mastra } = await setup();
-      (mastra as any).getServer = () => config.server;
-      (mastra as any).getStudio = () => config.studio;
-      const requestContext = new RequestContext();
-      requestContext.set('user', { id: 'u1' });
-      const args = { mastra, requestContext, knowledgeKey: 'main', scope: org };
-      for (const route of [GET_KNOWLEDGE_GRAPH_ROUTE, SEARCH_KNOWLEDGE_ROUTE, GET_KNOWLEDGE_ACTIVITY_ROUTE]) {
-        await expect(call(route, { ...args, q: 'pay' })).rejects.toMatchObject({
-          status: 403,
-          message: expect.stringContaining(MASTRA_KNOWLEDGE_SCOPE_KEY),
-        });
-      }
-      requestContext.set(MASTRA_KNOWLEDGE_SCOPE_KEY, org);
-      expect((await call(GET_KNOWLEDGE_GRAPH_ROUTE, args)).nodes).toHaveLength(1);
-    }
-
-    // No access control configured: the operator-tool default still reads the requested scope.
-    const { mastra } = await setup();
-    const requestContext = new RequestContext();
-    requestContext.set('user', { id: 'u1' });
-    const open = await call(GET_KNOWLEDGE_GRAPH_ROUTE, { mastra, requestContext, knowledgeKey: 'main', scope: team });
-    expect(open.nodes).toHaveLength(2);
-  });
-
-  it('parses one or many scope params and bounds them', () => {
-    expect(knowledgeViewQuerySchema.parse({ scope: 'org:a' }).scope).toEqual(['org:a']);
-    expect(knowledgeViewQuerySchema.parse({ scope: ['org:a', 'p:b'] }).scope).toEqual(['org:a', 'p:b']);
-    expect(knowledgeViewQuerySchema.safeParse({}).success).toBe(false);
-    expect(knowledgeViewQuerySchema.safeParse({ scope: [] }).success).toBe(false);
-    expect(knowledgeActivityQuerySchema.safeParse({ scope: 'org:a', limit: '1000' }).success).toBe(false);
+  it('parses repeated scopeId params and bounds query values', () => {
+    expect(knowledgeSearchQuerySchema.parse({ q: 'x', scopeId: 'a' }).scopeId).toEqual(['a']);
+    expect(knowledgeSearchQuerySchema.parse({ q: 'x', scopeId: ['a', 'b'] }).scopeId).toEqual(['a', 'b']);
+    expect(knowledgeSearchQuerySchema.safeParse({ q: '' }).success).toBe(false);
+    expect(knowledgeActivityQuerySchema.safeParse({ limit: '1000' }).success).toBe(false);
   });
 
   it('is gated by knowledge:read, and only GET routes exist', () => {
     for (const route of [
       LIST_KNOWLEDGE_ROUTE,
+      GET_KNOWLEDGE_TREE_ROUTE,
+      GET_KNOWLEDGE_PAGE_ROUTE,
       GET_KNOWLEDGE_GRAPH_ROUTE,
-      GET_KNOWLEDGE_NODE_ROUTE,
       SEARCH_KNOWLEDGE_ROUTE,
       GET_KNOWLEDGE_ACTIVITY_ROUTE,
     ]) {

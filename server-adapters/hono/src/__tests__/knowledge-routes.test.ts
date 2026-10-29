@@ -1,10 +1,10 @@
-import { createKnowledgeScopeBindingTestSuite } from '@mastra/server-adapters-test-suite';
+import { createKnowledgeRoutesTestSuite } from '@mastra/server-adapters-test-suite';
 import { Hono } from 'hono';
 
 import { MastraServer } from '../index';
 
-createKnowledgeScopeBindingTestSuite({
-  suiteName: 'Hono Knowledge scope binding',
+createKnowledgeRoutesTestSuite({
+  suiteName: 'Hono Knowledge routes',
   startServer: async mastra => {
     const app = new Hono();
     await new MastraServer({ app, mastra }).init();

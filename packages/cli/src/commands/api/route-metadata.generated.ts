@@ -3077,14 +3077,16 @@ export const API_ROUTE_METADATA = {
       "listProperty": "instances"
     }
   },
-  "GET /knowledge/:knowledgeKey/graph": {
+  "GET /knowledge/:knowledgeKey/tree": {
     "method": "GET",
-    "path": "/knowledge/:knowledgeKey/graph",
+    "path": "/knowledge/:knowledgeKey/tree",
     "pathParams": [
       "knowledgeKey"
     ],
     "queryParams": [
-      "scope"
+      "cursor",
+      "limit",
+      "parentId"
     ],
     "bodyParams": [],
     "hasQuery": true,
@@ -3093,15 +3095,33 @@ export const API_ROUTE_METADATA = {
       "kind": "record"
     }
   },
-  "GET /knowledge/:knowledgeKey/nodes/:nodeId": {
+  "GET /knowledge/:knowledgeKey/pages/:pageId": {
     "method": "GET",
-    "path": "/knowledge/:knowledgeKey/nodes/:nodeId",
+    "path": "/knowledge/:knowledgeKey/pages/:pageId",
     "pathParams": [
       "knowledgeKey",
-      "nodeId"
+      "pageId"
     ],
     "queryParams": [
-      "scope"
+      "noteCursor",
+      "noteLimit"
+    ],
+    "bodyParams": [],
+    "hasQuery": true,
+    "hasBody": false,
+    "responseShape": {
+      "kind": "record"
+    }
+  },
+  "GET /knowledge/:knowledgeKey/graph": {
+    "method": "GET",
+    "path": "/knowledge/:knowledgeKey/graph",
+    "pathParams": [
+      "knowledgeKey"
+    ],
+    "queryParams": [
+      "maxPages",
+      "rootId"
     ],
     "bodyParams": [],
     "hasQuery": true,
@@ -3117,8 +3137,9 @@ export const API_ROUTE_METADATA = {
       "knowledgeKey"
     ],
     "queryParams": [
+      "limit",
       "q",
-      "scope"
+      "scopeId"
     ],
     "bodyParams": [],
     "hasQuery": true,
@@ -3137,7 +3158,8 @@ export const API_ROUTE_METADATA = {
     "queryParams": [
       "cursor",
       "limit",
-      "scope"
+      "pageId",
+      "scopeId"
     ],
     "bodyParams": [],
     "hasQuery": true,

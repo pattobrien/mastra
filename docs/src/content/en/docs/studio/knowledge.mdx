@@ -1,6 +1,6 @@
 ---
 title: 'Knowledge'
-description: 'Browse the Knowledge instances registered on your Mastra server from Studio, and control who can read which scopes.'
+description: 'Browse the Knowledge instances registered on your Mastra server from Studio, as a page tree and a graph.'
 packages:
   - '@mastra/core'
   - '@mastra/server'
@@ -8,7 +8,9 @@ packages:
 
 # Knowledge
 
-Studio can browse the Knowledge instances registered on your Mastra server: a graph of nodes, records and pins, name search, activity, and a scope view. The page is read-only.
+Studio can browse the Knowledge instances registered on your Mastra server. It shows every scope and page as a tree beside a graph of the same pages, with parent links and the mentions between them. Selecting a page in either view opens it with its notes, pin and the pages it references. Search covers page names, synopses, bodies and note text. The page is read-only.
+
+On narrow screens the tree and graph share one panel, with a toggle between them that keeps the selected page.
 
 The routes that feed it are **off by default**. Until you enable them, the Knowledge page in Studio shows an explainer saying Knowledge browsing isn't enabled.
 
@@ -30,62 +32,21 @@ They mount under your configured API prefix (`/api/knowledge` by default) and ar
 | Route | Returns |
 | - | - |
 | `GET /knowledge` | The Knowledge instances you can read |
-| `GET /knowledge/:knowledgeKey/graph` | A bounded graph window for a scope |
-| `GET /knowledge/:knowledgeKey/nodes/:nodeId` | One node with its records and pin state |
-| `GET /knowledge/:knowledgeKey/search` | Name search within a scope |
-| `GET /knowledge/:knowledgeKey/activity` | Recent activity within a scope |
+| `GET /knowledge/:knowledgeKey/tree` | The root scopes, or the child scopes and pages under `parentId` |
+| `GET /knowledge/:knowledgeKey/pages/:pageId` | One page with its ancestors, notes, pin and referenced pages |
+| `GET /knowledge/:knowledgeKey/graph` | A bounded graph of pages with parent and mention edges |
+| `GET /knowledge/:knowledgeKey/search` | Pages and notes matching a query |
+| `GET /knowledge/:knowledgeKey/activity` | Recent changes, optionally for one scope or page |
 
-## How scope works
+## Access
 
-Every read takes the scope tags the viewer holds, and returns only what those tags can see. By default Studio lets the viewer choose the tags.
+Studio reads Knowledge as its owner: every route returns every scope, page and note in the instance. Scopes decide what an agent sees during a run. They don't limit Studio.
 
-If the viewer's tags exceed what a caller should be allowed to hold, bind them per caller by setting the `MASTRA_KNOWLEDGE_SCOPE_KEY` request-context key (the string `mastra__knowledgeScope`).
-
-Set it in `server.auth.authorize`, which runs after the caller is authenticated. Its `context` argument answers `context.get('requestContext')` on the Hono, Express, Fastify, Koa and Elysia adapters. The same code binds the scope on each of them. Don't set it in `server.middleware`: middleware runs **before** authentication, so the caller isn't known yet.
-
-```typescript
-import { Mastra } from '@mastra/core'
-import { KNOWLEDGE_ROUTES, MASTRA_KNOWLEDGE_SCOPE_KEY } from '@mastra/server/server-adapter'
-
-export const mastra = new Mastra({
-  server: {
-    apiRoutes: [...KNOWLEDGE_ROUTES],
-    auth: {
-      authenticateToken: async token => verifyToken(token),
-      authorize: async (path, _method, user, context) => {
-        if (path.startsWith('/api/knowledge')) {
-          const tags = tagsFor(user)
-          // Refuse rather than leave the key unset: an unset key means unbound.
-          if (!Array.isArray(tags)) return false
-          context.get('requestContext').set(MASTRA_KNOWLEDGE_SCOPE_KEY, tags)
-        }
-        return true
-      },
-    },
-  },
-})
-```
-
-If you configure `studio.auth`, Studio requests use it **instead of** `server.auth`, so `server.auth.authorize` never runs for them and nothing is bound. Put the same `authorize` in `studio.auth` (or in both) so the binding applies to whichever config the request uses.
-
-Never set the key to `undefined`. It reads back the same as an unset key, so the request is treated as unbound (see [Deployment notes](#deployment-notes)).
-
-Once the key is set:
-
-- A request for any tag outside the set returns `403`, and Studio shows the refusal next to the scope form.
-- An empty set permits nothing.
-- A malformed set returns `400`.
-
-:::warning
-
-Match on the **mounted** path, `/api/knowledge/*` by default, not the route path `/knowledge/*`. A check that misses the prefix leaves scope binding silently inactive.
-
-:::
+That makes access to the routes the boundary. Anyone who passes your auth and holds `knowledge:read` can read the whole instance, so grant it only to people who should see everything stored there.
 
 ## Deployment notes
 
-- **No RBAC provider:** the `knowledge:read` check is skipped, so any authenticated user can read any named scope unless your auth config binds scopes with the key above.
-- **Unbound scope with RBAC or FGA:** if an RBAC or FGA provider is configured (in `server` or `studio`) and no scope is bound for the request, every Knowledge read except `GET /knowledge` returns `403`. Bind a scope for every caller who should read Knowledge.
-- **Unbound scope without RBAC or FGA:** requests are trusted as sent, and the server logs a one-time warning. This suits an operator-controlled Studio.
-- **NestJS:** the NestJS adapter doesn't serve the Knowledge routes yet.
+- **No auth configured:** the routes are open to anyone who can reach the server. Enable them only where Studio itself is private.
+- **No RBAC provider:** the `knowledge:read` check is skipped, so any authenticated user can read every instance.
 - **With an FGA provider:** `GET /knowledge` lists only the instances the caller can read, and the other routes answer `404` for any other instance.
+- **NestJS:** the NestJS adapter doesn't serve the Knowledge routes yet.

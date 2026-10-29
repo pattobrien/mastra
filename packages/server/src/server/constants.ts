@@ -43,12 +43,6 @@ export const MASTRA_INHERITED_MEMORY_KEY = 'mastra__inheritedMemory';
  */
 export const MASTRA_AUTH_MODE_KEY = 'mastra__authMode';
 
-/**
- * Scope tags a caller may view Knowledge through, set by trusted middleware. The Knowledge routes reject a
- * requested scope outside it. Never accepted from a request body.
- */
-export const MASTRA_KNOWLEDGE_SCOPE_KEY = 'mastra__knowledgeScope';
-
 export type MastraAuthMode = 'studio' | 'server';
 
 export const MASTRA_CLIENT_TYPE_HEADER = 'x-mastra-client-type';
@@ -77,8 +71,6 @@ export const RESERVED_REQUEST_CONTEXT_KEYS = [
   // Agent scopes decide memory identity and what the agent acts as; only
   // server middleware may set them.
   MASTRA_SCOPES_KEY,
-  // The scope bound to a caller for Knowledge reads; a body-supplied value would widen it.
-  MASTRA_KNOWLEDGE_SCOPE_KEY,
   MASTRA_SCOPE_ACCESS_KEY,
   MASTRA_USER_KEY,
   MASTRA_USER_PERMISSIONS_KEY,

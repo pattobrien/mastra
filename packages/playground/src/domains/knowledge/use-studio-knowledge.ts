@@ -1,12 +1,6 @@
-import type { KnowledgeDataSource } from '@mastra/playground-ui/domains/knowledge/data-source';
-import type {
-  KnowledgeActivityPayload,
-  KnowledgeGraphPayload,
-  KnowledgeNodePayload,
-  KnowledgeSearchPayload,
-} from '@mastra/playground-ui/domains/knowledge/types';
+import type { KnowledgeGraphResponse, KnowledgePageResponse, KnowledgeSearchResponse } from '@mastra/client-js';
 import { useMastraClient } from '@mastra/react';
-import { skipToken, useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { keepPreviousData, skipToken, useQuery } from '@tanstack/react-query';
 
 const MIN_SEARCH_LENGTH = 2;
 
@@ -18,58 +12,37 @@ export function useKnowledgeInstances() {
   });
 }
 
-/** The graph visible from `scope`; idle until an instance and at least one scope tag are chosen. */
-export function useKnowledgeGraph(knowledgeKey: string | undefined, scope: string[]) {
+/** The bounded page graph across every root scope; its pages also feed the tree. */
+export function useKnowledgePageGraph(knowledgeKey: string | undefined) {
   const client = useMastraClient();
   return useQuery({
-    queryKey: ['knowledge', knowledgeKey, 'graph', scope],
+    queryKey: ['knowledge', knowledgeKey, 'graph'],
+    queryFn: knowledgeKey
+      ? async (): Promise<KnowledgeGraphResponse> => client.getKnowledge(knowledgeKey).graph()
+      : skipToken,
+  });
+}
+
+export function useKnowledgePage(knowledgeKey: string | undefined, pageId: string | null) {
+  const client = useMastraClient();
+  return useQuery({
+    queryKey: ['knowledge', knowledgeKey, 'page', pageId],
     queryFn:
-      knowledgeKey && scope.length > 0
-        ? async (): Promise<KnowledgeGraphPayload> => ({
-            view: 'project',
-            ...(await client.getKnowledge(knowledgeKey).graph(scope)),
-          })
+      knowledgeKey && pageId
+        ? async (): Promise<KnowledgePageResponse> => client.getKnowledge(knowledgeKey).page(pageId)
         : skipToken,
   });
 }
 
-/**
- * What the shared Knowledge explorer reads from Studio: one instance, viewed through the chosen scope tags.
- * Built fresh on every render, so the closure never holds a stale instance or scope.
- */
-export function useStudioKnowledgeDataSource(knowledgeKey: string | undefined, scope: string[]): KnowledgeDataSource {
+export function useKnowledgeSearch(knowledgeKey: string | undefined, query: string) {
   const client = useMastraClient();
-  const enabled = Boolean(knowledgeKey) && scope.length > 0;
-  return {
-    useNode: nodeId =>
-      useQuery({
-        queryKey: ['knowledge', knowledgeKey, 'node', nodeId, scope],
-        queryFn: enabled
-          ? async (): Promise<KnowledgeNodePayload> => client.getKnowledge(knowledgeKey!).node(nodeId, scope)
-          : skipToken,
-      }),
-    useActivity: () =>
-      useInfiniteQuery({
-        queryKey: ['knowledge', knowledgeKey, 'activity', scope],
-        queryFn: enabled
-          ? async ({ pageParam }): Promise<KnowledgeActivityPayload> =>
-              (await client
-                .getKnowledge(knowledgeKey!)
-                .activity(scope, { cursor: pageParam })) as KnowledgeActivityPayload
-          : skipToken,
-        initialPageParam: undefined as string | undefined,
-        getNextPageParam: page => page.nextCursor,
-      }),
-    useSearch: query => {
-      const trimmed = query.trim();
-      return useQuery({
-        queryKey: ['knowledge', knowledgeKey, 'search', scope, trimmed],
-        queryFn:
-          enabled && trimmed.length >= MIN_SEARCH_LENGTH
-            ? async (): Promise<KnowledgeSearchPayload> =>
-                (await client.getKnowledge(knowledgeKey!).search(trimmed, scope)) as KnowledgeSearchPayload
-            : skipToken,
-      });
-    },
-  };
+  const trimmed = query.trim();
+  return useQuery({
+    queryKey: ['knowledge', knowledgeKey, 'search', trimmed],
+    queryFn:
+      knowledgeKey && trimmed.length >= MIN_SEARCH_LENGTH
+        ? async (): Promise<KnowledgeSearchResponse> => client.getKnowledge(knowledgeKey).search(trimmed)
+        : skipToken,
+    placeholderData: keepPreviousData,
+  });
 }

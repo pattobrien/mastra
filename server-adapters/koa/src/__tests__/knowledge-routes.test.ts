@@ -1,15 +1,16 @@
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { createKnowledgeScopeBindingTestSuite } from '@mastra/server-adapters-test-suite';
-import express from 'express';
+import { createKnowledgeRoutesTestSuite } from '@mastra/server-adapters-test-suite';
+import Koa from 'koa';
+import bodyParser from 'koa-bodyparser';
 
 import { MastraServer } from '../index';
 
-createKnowledgeScopeBindingTestSuite({
-  suiteName: 'Express Knowledge scope binding',
+createKnowledgeRoutesTestSuite({
+  suiteName: 'Koa Knowledge routes',
   startServer: async mastra => {
-    const app = express();
-    app.use(express.json());
+    const app = new Koa();
+    app.use(bodyParser());
     await new MastraServer({ app, mastra }).init();
     const server: Server = await new Promise(resolve => {
       const s = app.listen(0, () => resolve(s));

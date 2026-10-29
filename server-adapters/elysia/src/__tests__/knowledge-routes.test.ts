@@ -1,11 +1,11 @@
-import { createKnowledgeScopeBindingTestSuite } from '@mastra/server-adapters-test-suite';
+import { createKnowledgeRoutesTestSuite } from '@mastra/server-adapters-test-suite';
 import { Elysia } from 'elysia';
 
 import { MastraServer } from '../index';
 import { startElysiaServer } from './helpers';
 
-createKnowledgeScopeBindingTestSuite({
-  suiteName: 'Elysia Knowledge scope binding',
+createKnowledgeRoutesTestSuite({
+  suiteName: 'Elysia Knowledge routes',
   startServer: async mastra => {
     const app = new Elysia();
     await new MastraServer({ app, mastra }).init();

@@ -1,37 +1,23 @@
 import { TooltipProvider } from '@mastra/playground-ui/components/Tooltip';
 import { LinkComponentProvider } from '@mastra/playground-ui/lib/framework';
-import { fireEvent, screen, waitFor } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { Route, Routes } from 'react-router';
 import { describe, expect, it } from 'vitest';
 import KnowledgePage from '..';
+import {
+  emptyKnowledgeGraph,
+  knowledgeGraph,
+  knowledgeInstances,
+  paymentsPageView,
+  runbookSearch,
+} from './fixtures/knowledge';
 import { Link } from '@/lib/link';
 import { stubLinkPaths } from '@/test/link-provider';
 import { server } from '@/test/msw-server';
 import { renderWithProviders, TEST_BASE_URL } from '@/test/render';
 
-const graph = {
-  nodes: [
-    {
-      id: 'n1',
-      name: 'Payments',
-      kind: 'service',
-      scope: ['org:acme'],
-      rung: 'org',
-      pinned: false,
-      recordCount: 1,
-      createdAt: '2026-01-01T00:00:00.000Z',
-      updatedAt: '2026-01-01T00:00:00.000Z',
-    },
-  ],
-  edges: [],
-  records: [{ id: 'r1', nodeIds: ['n1'], pinned: false, text: 'Payments is documented.' }],
-  truncated: false,
-  outOfWindow: [],
-  unresolvedCapped: { count: 0, names: [] },
-  pinCensus: { resource: 0, thread: 0 },
-  version: null,
-};
+const api = `${TEST_BASE_URL}/api/knowledge`;
 
 const renderPage = (entry = '/knowledge') =>
   renderWithProviders(
@@ -45,64 +31,113 @@ const renderPage = (entry = '/knowledge') =>
     { router: { initialEntries: [entry] } },
   );
 
+const withInstance = (graph = knowledgeGraph) =>
+  server.use(
+    http.get(api, () => HttpResponse.json(knowledgeInstances)),
+    http.get(`${api}/main/graph`, () => HttpResponse.json(graph)),
+  );
+
 describe('Knowledge page', () => {
-  it('explains how to register Knowledge when the server has none', async () => {
-    server.use(http.get(`${TEST_BASE_URL}/api/knowledge`, () => HttpResponse.json({ instances: [] })));
-    renderPage();
-    expect(await screen.findByText('No Knowledge instances')).toBeTruthy();
+  describe('when the server has no Knowledge instances', () => {
+    it('explains how to register one', async () => {
+      server.use(http.get(api, () => HttpResponse.json({ instances: [] })));
+      renderPage();
+      expect(await screen.findByText('No Knowledge instances')).toBeTruthy();
+    });
   });
 
-  it('explains how to opt into the routes when the server does not register them', async () => {
-    // The Knowledge routes are opt-in, so a server that has not registered them answers 404.
-    server.use(
-      http.get(`${TEST_BASE_URL}/api/knowledge`, () => HttpResponse.json({ error: 'Not found' }, { status: 404 })),
-    );
-    renderPage();
-    expect(await screen.findByText('Knowledge browsing is not enabled')).toBeTruthy();
+  describe('when the server does not register the Knowledge routes', () => {
+    it('explains how to opt into them', async () => {
+      server.use(http.get(api, () => HttpResponse.json({ error: 'Not found' }, { status: 404 })));
+      renderPage();
+      expect(await screen.findByText('Knowledge browsing is not enabled')).toBeTruthy();
+    });
   });
 
-  it('keeps the scope form when the server refuses a scope tag', async () => {
-    server.use(
-      http.get(`${TEST_BASE_URL}/api/knowledge`, () => HttpResponse.json({ instances: [{ key: 'main', id: 'kb' }] })),
-      http.get(`${TEST_BASE_URL}/api/knowledge/main/graph`, () =>
-        HttpResponse.json({ error: 'outside the caller scope' }, { status: 403 }),
-      ),
-    );
-    renderPage('/knowledge?scope=org:acme');
-    expect(await screen.findByText('That scope is not available to you')).toBeTruthy();
-    expect(screen.getByLabelText('Scope tags')).toBeTruthy();
-    expect(screen.queryByText(/Permission Denied/i)).toBeNull();
+  describe('when the caller lacks knowledge:read', () => {
+    it('shows the permission wall', async () => {
+      server.use(http.get(api, () => HttpResponse.json({ error: 'Forbidden' }, { status: 403 })));
+      renderPage();
+      expect(await screen.findByText(/Permission Denied/i)).toBeTruthy();
+    });
   });
 
-  it('asks for a scope before reading anything', async () => {
-    let graphRequests = 0;
-    server.use(
-      http.get(`${TEST_BASE_URL}/api/knowledge`, () => HttpResponse.json({ instances: [{ key: 'main', id: 'kb' }] })),
-      http.get(`${TEST_BASE_URL}/api/knowledge/main/graph`, () => {
-        graphRequests += 1;
-        return HttpResponse.json(graph);
-      }),
-    );
-    renderPage();
-    expect(await screen.findByText('Choose a scope')).toBeTruthy();
-    expect(graphRequests).toBe(0);
+  describe('when the instance has no pages yet', () => {
+    it('says agents add them as they run', async () => {
+      withInstance(emptyKnowledgeGraph);
+      renderPage();
+      expect(await screen.findByText('No pages yet')).toBeTruthy();
+    });
   });
 
-  it('reads the graph with the chosen scope tags and renders it', async () => {
-    const graphScopes: string[][] = [];
-    server.use(
-      http.get(`${TEST_BASE_URL}/api/knowledge`, () => HttpResponse.json({ instances: [{ key: 'main', id: 'kb' }] })),
-      http.get(`${TEST_BASE_URL}/api/knowledge/main/graph`, ({ request }) => {
-        graphScopes.push(new URL(request.url).searchParams.getAll('scope'));
-        return HttpResponse.json(graph);
-      }),
-    );
-    renderPage();
+  describe('when the instance has pages', () => {
+    it('reads the graph without asking for a scope', async () => {
+      const graphQueries: string[] = [];
+      server.use(
+        http.get(api, () => HttpResponse.json(knowledgeInstances)),
+        http.get(`${api}/main/graph`, ({ request }) => {
+          graphQueries.push(new URL(request.url).search);
+          return HttpResponse.json(knowledgeGraph);
+        }),
+      );
+      renderPage();
+      await waitFor(() => expect(graphQueries).toEqual(['']));
+    });
 
-    fireEvent.change(await screen.findByLabelText('Scope tags'), { target: { value: 'org:acme, project:web' } });
-    fireEvent.click(screen.getByRole('button', { name: 'View' }));
+    it('lists every page in the tree under its scope', async () => {
+      withInstance();
+      renderPage();
+      const tree = await screen.findByRole('tree');
+      expect(within(tree).getByText('Acme')).toBeTruthy();
+      expect(within(tree).getByText('Payments Service')).toBeTruthy();
+      expect(within(tree).getByText('Deploy Runbook')).toBeTruthy();
+    });
 
-    await waitFor(() => expect(graphScopes[0]).toEqual(['org:acme', 'project:web']));
-    expect(await screen.findByTestId('knowledge-graph-container')).toBeTruthy();
+    it('renders the graph beside the tree', async () => {
+      withInstance();
+      renderPage();
+      expect(await screen.findByTestId('knowledge-graph-container')).toBeTruthy();
+    });
+  });
+
+  describe('when a page is selected in the tree', () => {
+    it('opens its detail with its notes', async () => {
+      withInstance();
+      server.use(http.get(`${api}/main/pages/page-payments`, () => HttpResponse.json(paymentsPageView)));
+      renderPage();
+      fireEvent.click(within(await screen.findByRole('tree')).getByText('Payments Service'));
+      const detail = await screen.findByRole('region', { name: 'Selected page' });
+      expect(await within(detail).findByText('Retries card charges three times before failing.')).toBeTruthy();
+    });
+  });
+
+  describe('when the selected page no longer exists', () => {
+    it('says it may have been deleted or merged', async () => {
+      withInstance();
+      server.use(
+        http.get(`${api}/main/pages/page-gone`, () => HttpResponse.json({ error: 'Not found' }, { status: 404 })),
+      );
+      renderPage('/knowledge?page=page-gone');
+      expect(await screen.findByText('Page not found')).toBeTruthy();
+    });
+  });
+
+  describe('when a search matches a page', () => {
+    it('selects the page that is picked from the results', async () => {
+      withInstance();
+      server.use(
+        http.get(`${api}/main/search`, () => HttpResponse.json(runbookSearch)),
+        http.get(`${api}/main/pages/page-runbook`, () =>
+          HttpResponse.json({ ...paymentsPageView, page: knowledgeGraph.pages[2], notes: [] }),
+        ),
+      );
+      renderPage();
+      fireEvent.change(await screen.findByLabelText('Search knowledge'), { target: { value: 'deploy' } });
+      fireEvent.click(
+        await within(await screen.findByRole('listbox')).findByRole('button', { name: 'Deploy Runbook' }),
+      );
+      const detail = await screen.findByRole('region', { name: 'Selected page' });
+      expect(await within(detail).findByRole('heading', { name: 'Deploy Runbook' })).toBeTruthy();
+    });
   });
 });

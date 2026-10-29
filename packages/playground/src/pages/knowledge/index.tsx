@@ -1,29 +1,27 @@
-import { Button } from '@mastra/playground-ui/components/Button';
+import type { KnowledgeGraphResponse } from '@mastra/client-js';
 import { EmptyState } from '@mastra/playground-ui/components/EmptyState';
 import { PageLayout } from '@mastra/playground-ui/components/PageLayout';
 import { PermissionDenied } from '@mastra/playground-ui/domains/auth/components/permission-denied';
 import { SessionExpired } from '@mastra/playground-ui/domains/auth/components/session-expired';
-import { KnowledgeFlyout } from '@mastra/playground-ui/domains/knowledge/components/KnowledgeFlyout';
-import { KnowledgeGraph } from '@mastra/playground-ui/domains/knowledge/components/KnowledgeGraph';
-import { KnowledgeSearch } from '@mastra/playground-ui/domains/knowledge/components/KnowledgeSearch';
-import { KnowledgeDataSourceProvider } from '@mastra/playground-ui/domains/knowledge/data-source-provider';
+import { KnowledgePageDetail } from '@mastra/playground-ui/domains/knowledge/components/KnowledgePageDetail';
+import { KnowledgePageGraph } from '@mastra/playground-ui/domains/knowledge/components/KnowledgePageGraph';
+import { KnowledgePageTree } from '@mastra/playground-ui/domains/knowledge/components/KnowledgePageTree';
+import type { KnowledgePagePayload } from '@mastra/playground-ui/domains/knowledge/pageTypes';
 import { is401UnauthorizedError, is403ForbiddenError, is404NotFoundError } from '@mastra/playground-ui/utils/errors';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { PageBreadcrumbs } from '@/components/ui/page-breadcrumbs';
 import {
-  useKnowledgeGraph,
   useKnowledgeInstances,
-  useStudioKnowledgeDataSource,
+  useKnowledgePage,
+  useKnowledgePageGraph,
+  useKnowledgeSearch,
 } from '@/domains/knowledge/use-studio-knowledge';
 import { navCrumb } from '@/domains/navigation/crumbs';
 
 const crumbs = [navCrumb('/knowledge')];
 
-/** Scope tags are typed as `ns:value` words separated by spaces or commas. */
-function parseScopeInput(text: string): string[] {
-  return [...new Set(text.split(/[\s,]+/).filter(Boolean))];
-}
+type View = 'tree' | 'graph';
 
 function Shell({ children }: { children: React.ReactNode }) {
   return (
@@ -34,17 +32,175 @@ function Shell({ children }: { children: React.ReactNode }) {
   );
 }
 
+function SelectedPage({
+  knowledgeKey,
+  pageId,
+  pagesById,
+  onSelect,
+}: {
+  knowledgeKey: string;
+  pageId: string;
+  pagesById: ReadonlyMap<string, KnowledgePagePayload>;
+  onSelect: (page: KnowledgePagePayload) => void;
+}) {
+  const detail = useKnowledgePage(knowledgeKey, pageId);
+  // The detail's ancestors and referenced pages may sit outside the loaded graph; add them for names and links.
+  const known = useMemo(() => {
+    if (!detail.data) return pagesById;
+    const merged = new Map(pagesById);
+    for (const page of [...detail.data.ancestors, ...detail.data.related]) merged.set(page.id, page);
+    return merged;
+  }, [detail.data, pagesById]);
+
+  if (detail.isPending) return <p className="text-ui-md p-4 text-muted-foreground">Loading page…</p>;
+  if (detail.isError) {
+    return (
+      <EmptyState
+        tone="error"
+        variant="fill"
+        titleSlot={is404NotFoundError(detail.error) ? 'Page not found' : 'Failed to load the page'}
+        descriptionSlot={
+          is404NotFoundError(detail.error) ? 'It may have been deleted or merged.' : detail.error.message
+        }
+      />
+    );
+  }
+  return (
+    <KnowledgePageDetail
+      page={detail.data.page}
+      notes={detail.data.notes}
+      pin={detail.data.pin ?? undefined}
+      pagesById={known}
+      onPageClick={onSelect}
+    />
+  );
+}
+
+function SearchBox({ knowledgeKey, onSelect }: { knowledgeKey: string; onSelect: (pageId: string) => void }) {
+  const [query, setQuery] = useState('');
+  const search = useKnowledgeSearch(knowledgeKey, query);
+  const results = query.trim().length >= 2 ? (search.data?.results ?? []) : [];
+  const seen = new Set<string>();
+  const pages = results
+    .map(hit => hit.page)
+    .filter(page => (seen.has(page.id) ? false : (seen.add(page.id), true)))
+    .slice(0, 10);
+  return (
+    <div className="relative min-w-60 flex-1">
+      <input
+        aria-label="Search knowledge"
+        placeholder="Search pages and notes"
+        className="text-ui-md h-8 w-full rounded border border-border bg-card px-2"
+        value={query}
+        onChange={event => setQuery(event.target.value)}
+      />
+      {pages.length > 0 ? (
+        <ul
+          role="listbox"
+          aria-label="Search results"
+          className="absolute z-20 mt-1 max-h-72 w-full overflow-auto rounded border border-border bg-card shadow-raised"
+        >
+          {pages.map(page => (
+            <li key={page.id} role="option" aria-selected={false}>
+              <button
+                type="button"
+                className="text-ui-md w-full px-2 py-1.5 text-left hover:bg-muted"
+                onClick={() => {
+                  onSelect(page.id);
+                  setQuery('');
+                }}
+              >
+                {page.name}
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+function Explorer({ knowledgeKey, graph }: { knowledgeKey: string; graph: KnowledgeGraphResponse }) {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const selectedPageId = searchParams.get('page');
+  const view: View = searchParams.get('view') === 'graph' ? 'graph' : 'tree';
+  const pagesById = useMemo(() => new Map(graph.pages.map(page => [page.id, page])), [graph.pages]);
+  const mentionEdges = useMemo(() => graph.edges.filter(edge => edge.kind === 'mention'), [graph.edges]);
+
+  const update = (changes: Record<string, string | null>) => {
+    const next = new URLSearchParams(searchParams);
+    for (const [name, value] of Object.entries(changes)) {
+      if (value === null) next.delete(name);
+      else next.set(name, value);
+    }
+    setSearchParams(next);
+  };
+  const select = (pageId: string) => update({ page: pageId });
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <SearchBox knowledgeKey={knowledgeKey} onSelect={select} />
+        <div role="group" aria-label="View" className="flex rounded border border-border lg:hidden">
+          {(['tree', 'graph'] as const).map(option => (
+            <button
+              key={option}
+              type="button"
+              aria-pressed={view === option}
+              className="text-ui-md px-3 py-1 aria-pressed:bg-muted"
+              onClick={() => update({ view: option })}
+            >
+              {option === 'tree' ? 'Tree' : 'Graph'}
+            </button>
+          ))}
+        </div>
+      </div>
+      {graph.truncated ? (
+        <p className="text-ui-sm text-muted-foreground">
+          Showing the first {graph.pages.length} pages. Search to reach the rest.
+        </p>
+      ) : null}
+      <div className="flex min-h-0 flex-1 gap-3">
+        <aside
+          className={`min-h-0 w-full overflow-auto rounded border border-border lg:block lg:w-72 lg:shrink-0 ${view === 'tree' ? 'block' : 'hidden'}`}
+        >
+          <KnowledgePageTree pages={graph.pages} selectedPageId={selectedPageId} onSelect={page => select(page.id)} />
+        </aside>
+        <div
+          className={`relative h-full min-h-0 min-w-0 flex-1 lg:block ${view === 'graph' ? 'block' : 'hidden'}`}
+          data-testid="knowledge-graph-container"
+        >
+          <KnowledgePageGraph
+            pages={graph.pages}
+            edges={mentionEdges}
+            pinnedIds={graph.pinnedIds}
+            selectedPageId={selectedPageId}
+            onSelect={page => select(page.id)}
+          />
+        </div>
+        {selectedPageId ? (
+          <section
+            aria-label="Selected page"
+            className="min-h-0 w-full overflow-auto rounded border border-border lg:w-96 lg:shrink-0"
+          >
+            <SelectedPage
+              knowledgeKey={knowledgeKey}
+              pageId={selectedPageId}
+              pagesById={pagesById}
+              onSelect={page => select(page.id)}
+            />
+          </section>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 export default function KnowledgePage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const instances = useKnowledgeInstances();
-  const keyParam = searchParams.get('instance') ?? undefined;
-  const scope = searchParams.getAll('scope');
-  const knowledgeKey = keyParam ?? instances.data?.[0]?.key;
-  const [scopeText, setScopeText] = useState(scope.join(' '));
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-
-  const dataSource = useStudioKnowledgeDataSource(knowledgeKey, scope);
-  const graph = useKnowledgeGraph(knowledgeKey, scope);
+  const knowledgeKey = searchParams.get('instance') ?? instances.data?.[0]?.key;
+  const graph = useKnowledgePageGraph(knowledgeKey);
 
   const error = instances.error ?? graph.error;
   if (error && is401UnauthorizedError(error)) {
@@ -54,8 +210,7 @@ export default function KnowledgePage() {
       </Shell>
     );
   }
-  // Only a 403 on the instance list means no `knowledge:read`; a refused scope tag on the graph stays inline.
-  if (instances.error && is403ForbiddenError(instances.error)) {
+  if (error && is403ForbiddenError(error)) {
     return (
       <Shell>
         <PermissionDenied variant="fill" resource="knowledge" />
@@ -92,107 +247,48 @@ export default function KnowledgePage() {
         <EmptyState
           variant="fill"
           titleSlot="No Knowledge instances"
-          descriptionSlot="Register one on your Mastra instance with the `knowledge` option to browse it here."
+          descriptionSlot="Register one on your Mastra instance with the knowledge option to browse it here."
         />
       </Shell>
     );
   }
 
-  const apply = (event: React.FormEvent) => {
-    event.preventDefault();
-    const next = new URLSearchParams(searchParams);
-    next.delete('scope');
-    for (const tag of parseScopeInput(scopeText)) next.append('scope', tag);
-    setSelectedNodeId(null);
-    setSearchParams(next);
-  };
-
   return (
     <Shell>
-      <KnowledgeDataSourceProvider value={dataSource}>
-        <div className="flex h-full min-h-0 flex-1 flex-col gap-3">
-          <form onSubmit={apply} className="flex flex-wrap items-center gap-2">
-            {instances.data && instances.data.length > 1 ? (
-              <select
-                aria-label="Knowledge instance"
-                className="h-8 rounded border border-border bg-card px-2 text-body"
-                value={knowledgeKey}
-                onChange={event => {
-                  const next = new URLSearchParams(searchParams);
-                  next.set('instance', event.target.value);
-                  setSelectedNodeId(null);
-                  setSearchParams(next);
-                }}
-              >
-                {instances.data.map(instance => (
-                  <option key={instance.key} value={instance.key}>
-                    {instance.key}
-                  </option>
-                ))}
-              </select>
-            ) : null}
-            <input
-              aria-label="Scope tags"
-              placeholder="Scope tags, e.g. org:acme project:web"
-              className="h-8 min-w-72 flex-1 rounded border border-border bg-card px-2 text-body"
-              value={scopeText}
-              onChange={event => setScopeText(event.target.value)}
-            />
-            <Button type="submit" size="sm">
-              View
-            </Button>
-            {scope.length > 0 ? <KnowledgeSearch onSelect={result => setSelectedNodeId(result.id)} /> : null}
-          </form>
-
-          {scope.length === 0 ? (
-            <EmptyState
-              variant="fill"
-              titleSlot="Choose a scope"
-              descriptionSlot="Knowledge shows a record only when every one of its scope tags is in the set you enter. Enter the tags of the view you want to browse."
-            />
-          ) : graph.isPending ? (
-            <p className="p-4 text-body text-muted-foreground">Loading knowledge…</p>
-          ) : graph.isError && is403ForbiddenError(graph.error) ? (
-            <EmptyState
-              tone="error"
-              variant="fill"
-              titleSlot="That scope is not available to you"
-              descriptionSlot="The server refused one or more of these scope tags. Edit the tags above and press View."
-            />
-          ) : graph.isError ? (
-            <EmptyState
-              tone="error"
-              variant="fill"
-              titleSlot="Failed to load the graph"
-              descriptionSlot={graph.error.message}
-            />
-          ) : (
-            <div className="flex min-h-0 flex-1">
-              <div className="relative min-h-0 min-w-0 flex-1" data-testid="knowledge-graph-container">
-                <KnowledgeGraph
-                  payload={graph.data}
-                  focusedId={selectedNodeId}
-                  onFocusChange={id => {
-                    if (!id) setSelectedNodeId(null);
-                  }}
-                  onNodeClick={node => setSelectedNodeId(node.id)}
-                />
-              </div>
-              {selectedNodeId ? (
-                <KnowledgeFlyout
-                  nodeId={selectedNodeId}
-                  scopeLevel="org"
-                  onClose={() => setSelectedNodeId(null)}
-                  onNodeRef={name => {
-                    const target = graph.data.nodes.find(node => node.name.toLowerCase() === name.toLowerCase());
-                    if (target) setSelectedNodeId(target.id);
-                  }}
-                />
-              ) : null}
-            </div>
-          )}
-        </div>
-      </KnowledgeDataSourceProvider>
+      <div className="flex h-full min-h-0 flex-1 flex-col gap-3">
+        {instances.data && instances.data.length > 1 ? (
+          <select
+            aria-label="Knowledge instance"
+            className="text-ui-md h-8 w-fit rounded border border-border bg-card px-2"
+            value={knowledgeKey}
+            onChange={event => setSearchParams(new URLSearchParams({ instance: event.target.value }))}
+          >
+            {instances.data.map(instance => (
+              <option key={instance.key} value={instance.key}>
+                {instance.key}
+              </option>
+            ))}
+          </select>
+        ) : null}
+        {!knowledgeKey || graph.isPending ? (
+          <p className="text-ui-md p-4 text-muted-foreground">Loading knowledge…</p>
+        ) : graph.isError ? (
+          <EmptyState
+            tone="error"
+            variant="fill"
+            titleSlot="Failed to load Knowledge"
+            descriptionSlot={graph.error.message}
+          />
+        ) : graph.data.pages.length === 0 ? (
+          <EmptyState
+            variant="fill"
+            titleSlot="No pages yet"
+            descriptionSlot="Agents add pages and notes to Knowledge as they run. They will appear here."
+          />
+        ) : (
+          <Explorer knowledgeKey={knowledgeKey} graph={graph.data} />
+        )}
+      </div>
     </Shell>
   );
 }

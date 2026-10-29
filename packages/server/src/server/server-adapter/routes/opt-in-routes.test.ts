@@ -7,7 +7,7 @@ import { ALL_SERVER_ROUTES, OPT_IN_ROUTES, SERVER_ROUTES } from '.';
 describe('opt-in routes', () => {
   it('does not mount the Knowledge routes on every server', () => {
     const mountedPaths = new Set(SERVER_ROUTES.map(route => route.path));
-    for (const path of ['/knowledge', '/knowledge/:knowledgeKey/graph', '/knowledge/:knowledgeKey/search']) {
+    for (const path of ['/knowledge', '/knowledge/:knowledgeKey/graph', '/knowledge/:knowledgeKey/search', '/knowledge/:knowledgeKey/tree']) {
       expect(mountedPaths.has(path)).toBe(false);
     }
     expect(OPT_IN_ROUTES).toContain(KNOWLEDGE_ROUTES[0]);
@@ -19,7 +19,7 @@ describe('opt-in routes', () => {
     expect(ALL_SERVER_ROUTES.length).toBe(SERVER_ROUTES.length + OPT_IN_ROUTES.length);
     const allPaths = new Set(ALL_SERVER_ROUTES.map(route => route.path));
     expect(allPaths.has('/knowledge')).toBe(true);
-    expect(allPaths.has('/knowledge/:knowledgeKey/nodes/:nodeId')).toBe(true);
+    expect(allPaths.has('/knowledge/:knowledgeKey/pages/:pageId')).toBe(true);
   });
 
   it('still derives knowledge:read from the opt-in routes', () => {
