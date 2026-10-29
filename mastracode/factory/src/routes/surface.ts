@@ -54,12 +54,12 @@ import {
   workItemBranchSource,
   workItemThreadTitle,
 } from '../work-item-branch.js';
+import { KnowledgeRoutes } from './knowledge.js';
 import { buildAutomationRunRoutes } from './automation-runs.js';
 import { ConfigRoutes } from './config.js';
 import { invalidateCustomProvidersSnapshots } from './custom-provider-source.js';
 import { buildFsRoutes } from './fs.js';
 import { IntakeRoutes } from './intake.js';
-import { KnowledgeRoutes } from './knowledge.js';
 import { OAuthRoutes } from './oauth.js';
 import type { RouteAuth } from './route.js';
 import { SkillRoutes } from './skills.js';
@@ -812,14 +812,6 @@ export function assembleFactoryApiRoutes(deps: FactoryApiRoutesDeps): ApiRoute[]
           projects: deps.domains.projects,
           knowledge: async key => deps.controller.getMastra()?.getKnowledge(key),
           defaultKnowledgeKey: deps.knowledgeKey,
-          threadTitle: async threadId => {
-            const memory = await deps.controller.getMastra()?.getStorage()?.getStore('memory');
-            return (await memory?.getThreadById({ threadId }))?.title;
-          },
-          threadResourceId: async threadId => {
-            const memory = await deps.controller.getMastra()?.getStorage()?.getStore('memory');
-            return (await memory?.getThreadById({ threadId }))?.resourceId;
-          },
         }).routes()
       : []),
     ...(deps.factoryReady
