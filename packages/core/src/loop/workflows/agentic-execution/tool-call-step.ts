@@ -104,7 +104,6 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
   agentId,
   agentVersionId,
   resolvedScopes,
-  resolvedReadOnly,
   returnScorerData,
   mastra,
   requireToolApproval: requireToolApprovalFromFactory,
@@ -627,7 +626,6 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                 // Persisted unconditionally — [] included — so absence marks a pre-upgrade snapshot,
                 // whose resume adopts the supplied scopes instead of rejecting them.
                 __resolvedScopes: resolvedScopes ?? [],
-                ...(resolvedReadOnly?.length ? { __resolvedReadOnly: resolvedReadOnly } : {}),
                 ...(returnScorerData !== undefined ? { __returnScorerData: returnScorerData } : {}),
                 // Persist the inner suspended run id in the workflow snapshot, partitioned per
                 // tool call (resumeLabel = toolCallId). Persisted message metadata exposes the
@@ -680,7 +678,6 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
               // Persisted unconditionally — [] included — so absence marks a pre-upgrade snapshot,
               // whose resume adopts the supplied scopes instead of rejecting them.
               __resolvedScopes: resolvedScopes ?? [],
-              ...(resolvedReadOnly?.length ? { __resolvedReadOnly: resolvedReadOnly } : {}),
               ...(returnScorerData !== undefined ? { __returnScorerData: returnScorerData } : {}),
               toolCallId: inputData.toolCallId,
               toolName: inputData.toolName,
@@ -775,7 +772,6 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                 // Persisted unconditionally — [] included — so absence marks a pre-upgrade snapshot,
                 // whose resume adopts the supplied scopes instead of rejecting them.
                 __resolvedScopes: resolvedScopes ?? [],
-                ...(resolvedReadOnly?.length ? { __resolvedReadOnly: resolvedReadOnly } : {}),
                 ...(returnScorerData !== undefined ? { __returnScorerData: returnScorerData } : {}),
               },
               {
