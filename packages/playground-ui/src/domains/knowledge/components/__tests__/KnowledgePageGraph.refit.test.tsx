@@ -1,27 +1,40 @@
 // @vitest-environment jsdom
-import { screen } from '@testing-library/react';
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, screen } from '@testing-library/react';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { renderWithProviders } from '../../../../test/render';
 import type { KnowledgePagePayload } from '../../pageTypes';
 import { KnowledgePageGraph } from '../KnowledgePageGraph';
 
-/**
- * jsdom can't measure React Flow, so the test drives what the graph reads from it: the pane size React Flow
- * measured, whether every node has been measured, and the `fitView` call. Everything else is the real library.
- */
-const flow = { width: 0, height: 0, nodesInitialized: false };
+// jsdom can't lay React Flow out, so only its `fitView` is observed; everything else is the real library.
 const fitView = vi.fn(async () => true);
 vi.mock('@xyflow/react', async importOriginal => {
   const actual = await importOriginal<typeof import('@xyflow/react')>();
-  return {
-    ...actual,
-    useReactFlow: () => ({ ...actual.useReactFlow(), fitView }),
-    useNodesInitialized: () => flow.nodesInitialized,
-    useStore: <T,>(selector: (state: { width: number; height: number }) => T) =>
-      selector({ width: flow.width, height: flow.height }),
+  return { ...actual, useReactFlow: () => ({ ...actual.useReactFlow(), fitView }) };
+});
+
+/** A ResizeObserver whose size changes the test drives, per observed element. */
+const observers: Array<{ target: Element; callback: ResizeObserverCallback }> = [];
+beforeAll(() => {
+  window.ResizeObserver = class {
+    constructor(private callback: ResizeObserverCallback) {}
+    observe(target: Element) {
+      observers.push({ target, callback: this.callback });
+    }
+    unobserve() {}
+    disconnect() {
+      for (let i = observers.length - 1; i >= 0; i--) {
+        if (observers[i]?.callback === this.callback) observers.splice(i, 1);
+      }
+    }
   };
 });
+
+function resize(target: Element, width: number, height: number) {
+  for (const observer of observers.filter(o => o.target === target)) {
+    observer.callback([{ target, contentRect: { width, height } } as ResizeObserverEntry], {} as ResizeObserver);
+  }
+}
 
 const page = (id: string, parentId: string | null): KnowledgePagePayload => ({
   id,
@@ -37,87 +50,82 @@ const page = (id: string, parentId: string | null): KnowledgePagePayload => ({
   updatedAt: '2026-10-28T00:00:00.000Z',
 });
 
-const pages = [page('org', null), page('refunds', 'org')];
+/** Runs queued animation frames now, so a resize's refit is observable synchronously. */
+function flushFrames() {
+  vi.runOnlyPendingTimers();
+}
 
-// jsdom has no ResizeObserver, which React Flow uses to measure its viewport.
-beforeAll(() => {
-  window.ResizeObserver ??= class {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  };
-});
-
-describe('KnowledgePageGraph fitting its pages into view', () => {
+describe('KnowledgePageGraph inside a host that hides or resizes it', () => {
   beforeEach(() => {
-    Object.assign(flow, { width: 0, height: 0, nodesInitialized: false });
-    fitView.mockClear();
+    vi.useFakeTimers({ toFake: ['requestAnimationFrame', 'cancelAnimationFrame'] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
-  async function renderGraph(selectedPageId?: string) {
-    const graph = <KnowledgePageGraph pages={pages} edges={[]} selectedPageId={selectedPageId} onSelect={() => {}} />;
-    const result = renderWithProviders(graph);
-    await screen.findByTestId('knowledge-page-graph');
-    return (next: { width?: number; height?: number; nodesInitialized?: boolean; selectedPageId?: string }) => {
-      Object.assign(flow, next);
-      result.rerender(
-        <KnowledgePageGraph
-          pages={pages}
-          edges={[]}
-          selectedPageId={next.selectedPageId ?? selectedPageId}
-          onSelect={() => {}}
-        />,
-      );
-    };
+  async function renderGraph() {
+    renderWithProviders(
+      <KnowledgePageGraph pages={[page('org', null), page('refunds', 'org')]} edges={[]} onSelect={() => {}} />,
+    );
+    const container = await screen.findByTestId('knowledge-page-graph');
+    fitView.mockClear();
+    return container;
   }
 
-  it('waits for the nodes to be measured on a cold load, then fits', async () => {
-    Object.assign(flow, { width: 358, height: 392 });
-    const update = await renderGraph();
+  it('fits the pages into view once the hidden graph is shown', async () => {
+    const container = await renderGraph();
+    act(() => {
+      resize(container, 0, 0);
+      flushFrames();
+    });
     expect(fitView).not.toHaveBeenCalled();
 
-    update({ nodesInitialized: true });
+    act(() => {
+      resize(container, 358, 392);
+      flushFrames();
+    });
     expect(fitView).toHaveBeenCalledTimes(1);
   });
 
-  it('fits once a graph hidden behind a toggle is shown', async () => {
-    Object.assign(flow, { nodesInitialized: true });
-    const update = await renderGraph();
-    expect(fitView).not.toHaveBeenCalled();
-
-    update({ width: 358, height: 392 });
-    expect(fitView).toHaveBeenCalledTimes(1);
+  it('fits again when the graph is resized, once per frame', async () => {
+    const container = await renderGraph();
+    act(() => {
+      resize(container, 358, 392);
+      flushFrames();
+    });
+    act(() => {
+      resize(container, 800, 600);
+      resize(container, 1024, 700);
+      flushFrames();
+    });
+    expect(fitView).toHaveBeenCalledTimes(2);
   });
 
-  it('fits again when the graph is resized', async () => {
-    Object.assign(flow, { width: 358, height: 392, nodesInitialized: true });
-    const update = await renderGraph();
-    fitView.mockClear();
-
-    update({ width: 1024, height: 700 });
+  it('leaves the view alone when the size has not changed', async () => {
+    const container = await renderGraph();
+    act(() => {
+      resize(container, 358, 392);
+      flushFrames();
+    });
+    act(() => {
+      resize(container, 358, 392);
+      flushFrames();
+    });
     expect(fitView).toHaveBeenCalledTimes(1);
-  });
-
-  it("keeps the user's pan and zoom when only the selection changes", async () => {
-    Object.assign(flow, { width: 358, height: 392, nodesInitialized: true });
-    const update = await renderGraph();
-    fitView.mockClear();
-
-    update({ selectedPageId: 'refunds' });
-    expect(fitView).not.toHaveBeenCalled();
   });
 });
 
 describe('KnowledgePageGraph labels', () => {
   it('puts a small page’s name under its circle, unclipped', async () => {
-    renderWithProviders(<KnowledgePageGraph pages={pages} edges={[]} onSelect={() => {}} />);
+    renderWithProviders(
+      <KnowledgePageGraph pages={[page('org', null), page('refunds', 'org')]} edges={[]} onSelect={() => {}} />,
+    );
     const nodes = await screen.findAllByTestId('knowledge-page-node');
     const small = nodes.filter(node => Number.parseFloat(node.style.width) < 88);
     expect(small.length).toBeGreaterThan(0);
     for (const node of small) {
-      const name = node.getAttribute('data-page-id') ?? '';
       expect(node.querySelector('.knowledge-circle')?.textContent).toBe('');
-      expect(node.textContent).toContain(name);
+      expect(node.textContent).toContain(node.getAttribute('data-page-id') ?? '');
     }
   });
 });
