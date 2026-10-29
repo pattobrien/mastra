@@ -38,7 +38,7 @@ export function createKnowledgeRoutesTestSuite(config: KnowledgeRoutesTestSuiteC
     });
 
     const setup = async () => {
-      const knowledge = new Knowledge({ id: 'kb', storage: new InMemoryStore({ id: 'kb' }) });
+      const knowledge = new Knowledge({ id: 'kb', scopes: {}, storage: new InMemoryStore({ id: 'kb' }) });
       const store = await knowledge.getStorage();
       const provenance = { author: 'test' };
       const scopes: Record<string, string> = {};

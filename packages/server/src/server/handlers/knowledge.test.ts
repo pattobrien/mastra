@@ -21,7 +21,7 @@ const provenance = { author: 'agent:alex' };
 /** org:acme ─┬─ team:acme:support ─ Refunds (note mentions Roadmap)
  *            └─ team:acme:eng ─ Roadmap (pinned) */
 async function setup() {
-  const knowledge = new Knowledge({ id: 'kb', storage: new InMemoryStore({ id: 'kb' }) });
+  const knowledge = new Knowledge({ id: 'kb', scopes: {}, storage: new InMemoryStore({ id: 'kb' }) });
   const store = await knowledge.getStorage();
   const acme = (
     await store.materializeScope({ address: 'org:acme', declaration: 'org:$orgId', name: 'Acme', provenance })
@@ -175,8 +175,8 @@ describe('Knowledge read routes', () => {
 
 describe('Knowledge read routes with app auth', () => {
   /**
-   * Stands in for `Knowledge.readScopeFor` (landing with the schema-4 Knowledge class): each team principal
-   * reads its own team scope by address, and `org:acme` reads the org scope.
+   * Stubs `Knowledge.readScopeFor` so each principal reads the scope at its own address, and an
+   * undeclared principal fails the way the real method does.
    */
   async function setupWithAuth() {
     const ctx = await setup();
@@ -270,17 +270,5 @@ describe('Knowledge read routes with app auth', () => {
         call(GET_KNOWLEDGE_GRAPH_ROUTE, { mastra, requestContext: asCaller(principals), knowledgeKey: 'main' }),
       ).rejects.toMatchObject({ status: 500 });
     }
-  });
-
-  it('says so when the instance cannot resolve principals yet', async () => {
-    const { mastra } = await setup();
-    (mastra as any).getServer = () => ({ auth: {} });
-    await expect(
-      call(GET_KNOWLEDGE_GRAPH_ROUTE, {
-        mastra,
-        requestContext: asCaller(['team:acme:support']),
-        knowledgeKey: 'main',
-      }),
-    ).rejects.toMatchObject({ status: 501 });
   });
 });

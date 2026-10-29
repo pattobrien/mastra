@@ -5,6 +5,7 @@ import {
   readKnowledgePageGraph,
   searchKnowledgeExplorerPages,
 } from '@mastra/core/knowledge';
+import type { Knowledge } from '@mastra/core/knowledge';
 import type { Mastra } from '@mastra/core/mastra';
 import type { RequestContext } from '@mastra/core/request-context';
 import type { KnowledgeReadScope, KnowledgeStorage } from '@mastra/core/storage';
@@ -45,11 +46,6 @@ import { handleError } from './error';
  * (KNOWLEDGE_ROUTES); hosts with their own scoping (Factory) do not mount them.
  */
 
-/** The instance method that turns principals into a read scope; lands on `Knowledge` with the schema-4 migration. */
-interface KnowledgeReadScopeResolver {
-  readScopeFor(principals: string[]): Promise<KnowledgeReadScope>;
-}
-
 function hasAuth(mastra: Mastra): boolean {
   return Boolean(mastra.getServer?.()?.auth || (mastra as any).getStudio?.()?.auth);
 }
@@ -57,7 +53,7 @@ function hasAuth(mastra: Mastra): boolean {
 async function callerReadScope(
   mastra: Mastra,
   requestContext: RequestContext | undefined,
-  instance: object,
+  instance: Knowledge,
 ): Promise<KnowledgeReadScope> {
   if (!hasAuth(mastra)) return 'all';
 
@@ -74,12 +70,8 @@ async function callerReadScope(
       message: `Request context key "${MASTRA_KNOWLEDGE_PRINCIPALS_KEY}" must be a string array or 'all'.`,
     });
   }
-  const resolver = (instance as Partial<KnowledgeReadScopeResolver>).readScopeFor;
-  if (typeof resolver !== 'function') {
-    throw new HTTPException(501, { message: 'This Knowledge instance cannot resolve principals to a read scope yet.' });
-  }
   try {
-    return await resolver.call(instance, principals);
+    return await instance.readScopeFor(principals);
   } catch (error) {
     // A principal that matches no declared scope type: the app's mapping disagrees with its declarations.
     if (error instanceof Error && error.name === 'KnowledgeDeclarationError') {
