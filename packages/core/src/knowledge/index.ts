@@ -546,6 +546,13 @@ export type {
   KnowledgeTreeChildren,
 } from './explorer-pages';
 export type { KnowledgeConfig } from './config';
+export { knowledgeScopeAddress, knowledgeMemoryScopes } from './declarations';
+export type {
+  KnowledgeScopeDeclaration,
+  KnowledgeScopeDeclarations,
+  KnowledgeAccessRule,
+  KnowledgeRole,
+} from './declarations';
 export type {
   KnowledgeScopeAccessConfig,
   KnowledgeScopeChildTemplate,
