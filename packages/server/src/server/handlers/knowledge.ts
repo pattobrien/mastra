@@ -1,10 +1,4 @@
-import {
-  listKnowledgeTreeChildren,
-  readKnowledgePage,
-  readKnowledgePageActivity,
-  readKnowledgePageGraph,
-  searchKnowledgeExplorerPages,
-} from '@mastra/core/knowledge';
+import * as coreKnowledge from '@mastra/core/knowledge';
 import type { Knowledge } from '@mastra/core/knowledge';
 import type { Mastra } from '@mastra/core/mastra';
 import type { RequestContext } from '@mastra/core/request-context';
@@ -100,11 +94,52 @@ async function accessibleInstances(
   return new Set(accessible.map(entry => entry.key));
 }
 
+type KnowledgePageReaders = Pick<
+  typeof coreKnowledge,
+  | 'listKnowledgeTreeChildren'
+  | 'readKnowledgePage'
+  | 'readKnowledgePageActivity'
+  | 'readKnowledgePageGraph'
+  | 'searchKnowledgeExplorerPages'
+>;
+
+// The page readers first ship in @mastra/core 1.81.0, above this package's peer floor. A named import
+// of an export an older core lacks fails at ESM link time and takes the whole server down, so they are
+// read off the namespace (as in schedules-workflows-shim.ts) and the routes answer 501 without them.
+const pageReaders: Partial<KnowledgePageReaders> = coreKnowledge;
+
+function requirePageReaders(): KnowledgePageReaders {
+  const {
+    listKnowledgeTreeChildren,
+    readKnowledgePage,
+    readKnowledgePageActivity,
+    readKnowledgePageGraph,
+    searchKnowledgeExplorerPages,
+  } = pageReaders;
+  if (
+    !listKnowledgeTreeChildren ||
+    !readKnowledgePage ||
+    !readKnowledgePageActivity ||
+    !readKnowledgePageGraph ||
+    !searchKnowledgeExplorerPages
+  ) {
+    throw new HTTPException(501, { message: 'Knowledge browsing needs @mastra/core 1.81.0 or later.' });
+  }
+  return {
+    listKnowledgeTreeChildren,
+    readKnowledgePage,
+    readKnowledgePageActivity,
+    readKnowledgePageGraph,
+    searchKnowledgeExplorerPages,
+  };
+}
+
 async function resolveStore(
   mastra: Mastra,
   requestContext: RequestContext | undefined,
   knowledgeKey: string | undefined,
-): Promise<{ store: KnowledgeStorage; read: KnowledgeReadScope }> {
+): Promise<{ store: KnowledgeStorage; read: KnowledgeReadScope; readers: KnowledgePageReaders }> {
+  const readers = requirePageReaders();
   const instance = knowledgeKey ? mastra.listKnowledge()[knowledgeKey] : undefined;
   if (!knowledgeKey || !instance)
     throw new HTTPException(404, { message: `Knowledge ${knowledgeKey ?? ''} not found` });
@@ -120,7 +155,7 @@ async function resolveStore(
     if (!allowed) throw new HTTPException(404, { message: `Knowledge ${knowledgeKey} not found` });
   }
   const read = await callerReadScope(mastra, requestContext, instance);
-  return { store: await instance.getStorage(), read };
+  return { store: await instance.getStorage(), read, readers };
 }
 
 export const LIST_KNOWLEDGE_ROUTE = createRoute({
@@ -158,9 +193,9 @@ export const GET_KNOWLEDGE_TREE_ROUTE = createRoute({
   requiresAuth: true,
   handler: async ({ mastra, requestContext, knowledgeKey, parentId, cursor, limit }) => {
     try {
-      const { store, read } = await resolveStore(mastra, requestContext, knowledgeKey);
+      const { store, read, readers } = await resolveStore(mastra, requestContext, knowledgeKey);
       return {
-        ...(await listKnowledgeTreeChildren(store, { parentId: parentId ?? null, read, cursor, limit })),
+        ...(await readers.listKnowledgeTreeChildren(store, { parentId: parentId ?? null, read, cursor, limit })),
       };
     } catch (error) {
       return handleError(error, 'Error reading Knowledge tree');
@@ -182,8 +217,8 @@ export const GET_KNOWLEDGE_PAGE_ROUTE = createRoute({
   requiresAuth: true,
   handler: async ({ mastra, requestContext, knowledgeKey, pageId, noteCursor, noteLimit }) => {
     try {
-      const { store, read } = await resolveStore(mastra, requestContext, knowledgeKey);
-      const view = await readKnowledgePage(store, { pageId, read, noteCursor, noteLimit });
+      const { store, read, readers } = await resolveStore(mastra, requestContext, knowledgeKey);
+      const view = await readers.readKnowledgePage(store, { pageId, read, noteCursor, noteLimit });
       if (!view) throw new HTTPException(404, { message: 'Knowledge page not found' });
       return { ...view };
     } catch (error) {
@@ -206,8 +241,8 @@ export const GET_KNOWLEDGE_GRAPH_ROUTE = createRoute({
   requiresAuth: true,
   handler: async ({ mastra, requestContext, knowledgeKey, rootId, maxPages }) => {
     try {
-      const { store, read } = await resolveStore(mastra, requestContext, knowledgeKey);
-      const graph = await readKnowledgePageGraph(store, {
+      const { store, read, readers } = await resolveStore(mastra, requestContext, knowledgeKey);
+      const graph = await readers.readKnowledgePageGraph(store, {
         read,
         rootId: rootId ?? null,
         ...(maxPages ? { limits: { maxPages } } : {}),
@@ -233,8 +268,8 @@ export const SEARCH_KNOWLEDGE_ROUTE = createRoute({
   requiresAuth: true,
   handler: async ({ mastra, requestContext, knowledgeKey, q, scopeId, limit }) => {
     try {
-      const { store, read } = await resolveStore(mastra, requestContext, knowledgeKey);
-      const results = await searchKnowledgeExplorerPages(store, {
+      const { store, read, readers } = await resolveStore(mastra, requestContext, knowledgeKey);
+      const results = await readers.searchKnowledgeExplorerPages(store, {
         query: q,
         read,
         ...(scopeId?.length ? { scopeIds: scopeId } : {}),
@@ -260,8 +295,8 @@ export const GET_KNOWLEDGE_ACTIVITY_ROUTE = createRoute({
   requiresAuth: true,
   handler: async ({ mastra, requestContext, knowledgeKey, scopeId, pageId, cursor, limit }) => {
     try {
-      const { store, read } = await resolveStore(mastra, requestContext, knowledgeKey);
-      return { ...(await readKnowledgePageActivity(store, { read, scopeId, pageId, cursor, limit })) };
+      const { store, read, readers } = await resolveStore(mastra, requestContext, knowledgeKey);
+      return { ...(await readers.readKnowledgePageActivity(store, { read, scopeId, pageId, cursor, limit })) };
     } catch (error) {
       return handleError(error, 'Error reading Knowledge activity');
     }
