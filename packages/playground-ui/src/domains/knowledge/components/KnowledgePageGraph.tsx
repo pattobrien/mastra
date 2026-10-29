@@ -12,6 +12,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import { Pin } from 'lucide-react';
 import { memo, useEffect, useMemo, useRef } from 'react';
+import type { CSSProperties } from 'react';
 
 import { runLayout } from '../lib/layout';
 import { pageGraphEdges, toPageFlow } from '../lib/pageGraph';
@@ -22,8 +23,10 @@ import { Txt } from '@/ds/components/Txt';
 
 import './knowledge.css';
 
-const SCOPE_STYLE = { background: 'var(--card)', borderColor: 'var(--chart-blue)' };
-const PAGE_STYLE = { background: 'var(--card)', borderColor: 'var(--border-strong)' };
+// knowledge.css draws the border and the selection ring from this colour.
+type CircleStyle = CSSProperties & { '--knowledge-color': string };
+const SCOPE_STYLE: CircleStyle = { '--knowledge-color': 'var(--chart-blue)' };
+const PAGE_STYLE: CircleStyle = { '--knowledge-color': 'var(--border-strong)' };
 
 /** Circles smaller than this are too small to hold a readable name, so it sits underneath them. */
 const LABEL_INSIDE_MIN_SIZE = 88;
