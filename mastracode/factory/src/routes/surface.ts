@@ -54,6 +54,7 @@ import {
   workItemBranchSource,
   workItemThreadTitle,
 } from '../work-item-branch.js';
+import { KnowledgeRoutes } from './knowledge.js';
 import { buildAutomationRunRoutes } from './automation-runs.js';
 import { ConfigRoutes } from './config.js';
 import { invalidateCustomProvidersSnapshots } from './custom-provider-source.js';
@@ -768,9 +769,7 @@ export function assembleFactoryApiRoutes(deps: FactoryApiRoutesDeps): ApiRoute[]
       memorySettings: deps.domains.memorySettings,
       factoryProjects: deps.domains.projects,
       customProviders: deps.domains.customProviders,
-      // Knowledge routes are off while they move from the removed v2 node store onto the page store, so the
-      // UI hides the Knowledge page; `knowledgeEnabled` comes back into use when they return.
-      features: { knowledge: false, mcp: deps.mcpEnabled },
+      features: { knowledge: deps.knowledgeEnabled, mcp: deps.mcpEnabled },
       deploymentProviders: deps.deploymentModelProviders,
       onCredentialsChanged: invalidateTenantCredentialSnapshots,
       onCustomProvidersChanged: invalidateCustomProvidersSnapshots,
@@ -805,6 +804,14 @@ export function assembleFactoryApiRoutes(deps: FactoryApiRoutesDeps): ApiRoute[]
           integrations: (deps.integrations ?? []).flatMap(({ integration }) =>
             integration.intake ? [{ id: integration.id, intake: integration.intake }] : [],
           ),
+        }).routes()
+      : []),
+    ...(deps.factoryReady && deps.knowledgeEnabled
+      ? new KnowledgeRoutes({
+          auth: deps.auth,
+          projects: deps.domains.projects,
+          knowledge: async key => deps.controller.getMastra()?.getKnowledge(key),
+          defaultKnowledgeKey: deps.knowledgeKey,
         }).routes()
       : []),
     ...(deps.factoryReady
