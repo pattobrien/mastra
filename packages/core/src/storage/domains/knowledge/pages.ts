@@ -14,6 +14,8 @@
  * @experimental Knowledge APIs are experimental and may change without notice.
  */
 
+import { estimateTokenCount } from 'tokenx';
+
 /**
  * Who changed something, recorded on every page and note change.
  *
@@ -162,7 +164,9 @@ export interface KnowledgePin {
 }
 
 /**
- * Most levels a page may sit below its root scope. Creates and moves past it are refused.
+ * Most levels an ordinary page may sit below its home scope page: a page directly under its scope
+ * is depth 1. Scope pages (including scopes nested under scopes by `belongsTo` or as template
+ * children) don't count and reset the count. Creates and moves past it are refused.
  *
  * @experimental
  */
@@ -195,6 +199,34 @@ export const MAX_KNOWLEDGE_PAGE_DESCRIPTION_TOKENS = 100;
  */
 export const MAX_KNOWLEDGE_NOTE_TOKENS = 250;
 
+/**
+ * Rejects a page description over {@link MAX_KNOWLEDGE_PAGE_DESCRIPTION_TOKENS} before any write.
+ * Every adapter calls this so all stores share one estimator and one error.
+ *
+ * @experimental
+ */
+export function assertKnowledgePageDescriptionWithinBound(description: string | undefined): void {
+  if (description === undefined) return;
+  if (estimateTokenCount(description) > MAX_KNOWLEDGE_PAGE_DESCRIPTION_TOKENS) {
+    throw new Error(
+      `Knowledge page description exceeds the ${MAX_KNOWLEDGE_PAGE_DESCRIPTION_TOKENS} token limit; put long-form text in the page body`,
+    );
+  }
+}
+
+/**
+ * Rejects note text over {@link MAX_KNOWLEDGE_NOTE_TOKENS} before any write.
+ *
+ * @experimental
+ */
+export function assertKnowledgeNoteTextWithinBound(text: string): void {
+  if (estimateTokenCount(text) > MAX_KNOWLEDGE_NOTE_TOKENS) {
+    throw new Error(
+      `Knowledge note text exceeds the ${MAX_KNOWLEDGE_NOTE_TOKENS} token limit; split it into separate notes or put long-form text in the page body`,
+    );
+  }
+}
+
 /** @experimental */
 export class KnowledgeMoveTooLargeError extends Error {
   constructor(
@@ -211,8 +243,19 @@ export class KnowledgeMoveTooLargeError extends Error {
 /** @experimental */
 export class KnowledgePageDepthError extends Error {
   constructor(pageId: string) {
-    super(`Page ${pageId} would sit more than ${MAX_KNOWLEDGE_PAGE_DEPTH} levels below its root scope.`);
+    super(`Page ${pageId} would sit more than ${MAX_KNOWLEDGE_PAGE_DEPTH} levels below its home scope.`);
     this.name = 'KnowledgePageDepthError';
+  }
+}
+
+/** @experimental */
+export class KnowledgePageKeyConflictError extends Error {
+  constructor(
+    readonly key: string,
+    readonly scopeId: string,
+  ) {
+    super(`Knowledge page key "${key}" already exists in scope ${scopeId}. Rename or remove one of the keys first.`);
+    this.name = 'KnowledgePageKeyConflictError';
   }
 }
 
@@ -471,13 +514,19 @@ export interface KnowledgePageStore {
   }): Promise<KnowledgePageListOutput>;
   createPage(input: CreateKnowledgePageInput): Promise<KnowledgePage>;
   updatePage(input: UpdateKnowledgePageInput): Promise<KnowledgePage>;
-  /** Moves the page and its subtree in one transaction; refuses scope pages, cycles, depth and size. */
+  /**
+   * Moves the page and its subtree in one transaction; refuses scope pages, cycles, depth and size,
+   * and refuses with {@link KnowledgePageKeyConflictError}, before changing anything, when a live
+   * carried page's key already exists in the destination scope. Size and depth count live pages only;
+   * soft-deleted descendants move with their parents without counting.
+   */
   movePage(input: MoveKnowledgePageInput): Promise<KnowledgePage>;
   /**
    * Moves the source's notes, child pages and pin audience to the target, retargets mentions of the
    * source, and soft-deletes the source with `mergedInto`. Notes keep their stamps and text. Refuses
    * scope pages on either side, a target inside the source's subtree (or the source itself), and
-   * merges past the depth limit or {@link MAX_KNOWLEDGE_MOVE_PAGES} carried pages, like `movePage`.
+   * merges past the depth limit or {@link MAX_KNOWLEDGE_MOVE_PAGES} carried pages, and key clashes
+   * in the target's scope, like `movePage` (the source itself is deleted, so its key never clashes).
    */
   mergePages(input: MergeKnowledgePagesInput): Promise<KnowledgePage>;
   /** Soft-deletes an ordinary page with no live children and drops its pin; refuses scope pages. */
