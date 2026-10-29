@@ -1,5 +1,6 @@
 import type { Query, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { isAgentCompatible } from '@mastra/core/agent';
+import { createScorer, extractTrajectory, runEvals } from '@mastra/core/evals';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ClaudeSDKAgent } from './index';
@@ -101,6 +102,53 @@ function createAssistantMessage(id: string, usage: Record<string, number>): SDKM
     },
     session_id: 'session-id',
   } as SDKMessage;
+}
+
+function createToolUseMessage(id: string, name: string, input: Record<string, unknown>): SDKMessage {
+  return {
+    type: 'assistant',
+    message: {
+      id: `assistant-${id}`,
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'tool_use', id, name, input }],
+      model: TEST_CLAUDE_MODEL,
+      stop_reason: 'tool_use',
+      stop_sequence: null,
+      usage: { input_tokens: 10, output_tokens: 4 },
+    },
+    session_id: 'session-id',
+  } as SDKMessage;
+}
+
+function createToolResultMessage(toolUseId: string, content: unknown, isError = false): SDKMessage {
+  return {
+    type: 'user',
+    message: {
+      role: 'user',
+      content: [{ type: 'tool_result', tool_use_id: toolUseId, content, is_error: isError }],
+    },
+    session_id: 'session-id',
+    parent_tool_use_id: null,
+  } as SDKMessage;
+}
+
+function createToolSession(isError = false): SDKMessage[] {
+  return [
+    createToolUseMessage('toolu_1', 'Skill', { skill: 'fruit-oracle' }),
+    createToolResultMessage('toolu_1', 'oracle text', isError),
+    createResultMessage('The oracle says durian.'),
+  ];
+}
+
+function createToolAgent(): ClaudeSDKAgent {
+  return new ClaudeSDKAgent({
+    id: 'claude-agent',
+    description: 'Claude',
+    sdkOptions: {
+      model: TEST_CLAUDE_MODEL,
+    },
+  });
 }
 
 describe('ClaudeSDKAgent', () => {
@@ -372,6 +420,135 @@ describe('ClaudeSDKAgent', () => {
         continue: true,
       }),
     });
+  });
+
+  it('generate returns tool calls and tool results from the Claude session', async () => {
+    queryMock.mockImplementationOnce(() => createQuery(createToolSession()));
+    const agent = createToolAgent();
+
+    const result = await agent.generate('Ask the oracle');
+
+    expect(result.text).toBe('The oracle says durian.');
+    expect(result.toolCalls).toHaveLength(1);
+    expect(result.toolCalls[0]?.payload).toMatchObject({
+      toolCallId: 'toolu_1',
+      toolName: 'Skill',
+      args: { skill: 'fruit-oracle' },
+    });
+    expect(result.toolResults).toHaveLength(1);
+    expect(result.toolResults[0]?.payload).toMatchObject({
+      toolCallId: 'toolu_1',
+      toolName: 'Skill',
+      result: 'oracle text',
+      isError: false,
+    });
+    expect(result.steps[0]?.toolCalls).toHaveLength(1);
+    expect(result.steps[0]?.toolResults).toHaveLength(1);
+  });
+
+  it('generate returns scoring data with tool invocation parts', async () => {
+    queryMock.mockImplementationOnce(() => createQuery(createToolSession()));
+    const agent = createToolAgent();
+
+    const result = await agent.generate('Ask the oracle', { returnScorerData: true });
+
+    expect(result.scoringData?.input.inputMessages[0]?.content.parts[0]).toMatchObject({
+      type: 'text',
+      text: 'Ask the oracle',
+    });
+    expect(result.scoringData?.output).toHaveLength(1);
+    expect(result.scoringData?.output[0]?.role).toBe('assistant');
+    expect(result.scoringData?.output[0]?.content.format).toBe(2);
+    expect(result.scoringData?.output[0]?.content.parts).toMatchObject([
+      {
+        type: 'tool-invocation',
+        toolInvocation: {
+          state: 'result',
+          toolCallId: 'toolu_1',
+          toolName: 'Skill',
+          args: { skill: 'fruit-oracle' },
+          result: 'oracle text',
+        },
+      },
+      { type: 'text', text: 'The oracle says durian.' },
+    ]);
+    expect(result.messages.filter(message => message.role === 'assistant')).toHaveLength(1);
+  });
+
+  it('stream returns tool calls, tool results and scoring data from the Claude session', async () => {
+    queryMock.mockImplementationOnce(() => createQuery(createToolSession()));
+    const agent = createToolAgent();
+
+    const stream = await agent.stream('Ask the oracle', { returnScorerData: true });
+    const chunkTypes: string[] = [];
+    for await (const chunk of stream.fullStream) {
+      chunkTypes.push(chunk.type);
+    }
+    const result = await stream.getFullOutput();
+
+    expect(chunkTypes).toContain('tool-call');
+    expect(chunkTypes).toContain('tool-result');
+    expect(result.text).toBe('The oracle says durian.');
+    expect(result.toolCalls[0]?.payload).toMatchObject({
+      toolCallId: 'toolu_1',
+      toolName: 'Skill',
+      args: { skill: 'fruit-oracle' },
+    });
+    expect(result.toolResults[0]?.payload.result).toBe('oracle text');
+    expect(result.steps[0]?.toolCalls).toHaveLength(1);
+    expect(result.scoringData?.input.inputMessages[0]?.content.parts[0]).toMatchObject({
+      type: 'text',
+      text: 'Ask the oracle',
+    });
+    expect(result.scoringData?.output[0]?.content.parts).toMatchObject([
+      {
+        type: 'tool-invocation',
+        toolInvocation: {
+          state: 'result',
+          toolCallId: 'toolu_1',
+          toolName: 'Skill',
+          args: { skill: 'fruit-oracle' },
+          result: 'oracle text',
+        },
+      },
+      { type: 'text', text: 'The oracle says durian.' },
+    ]);
+  });
+
+  it('marks errored tool results on both the chunk and the tool invocation part', async () => {
+    queryMock.mockImplementationOnce(() => createQuery(createToolSession(true)));
+    const agent = createToolAgent();
+
+    const result = await agent.generate('Ask the oracle', { returnScorerData: true });
+
+    expect(result.toolResults[0]?.payload.isError).toBe(true);
+    expect(result.scoringData?.output[0]?.content.parts[0]).toMatchObject({
+      type: 'tool-invocation',
+      toolInvocation: {
+        toolCallId: 'toolu_1',
+        toolName: 'Skill',
+        result: 'oracle text',
+        isError: true,
+      },
+    });
+  });
+
+  it('runEvals scorers see the Claude tool calls in the run output', async () => {
+    queryMock.mockImplementationOnce(() => createQuery(createToolSession()));
+    const agent = createToolAgent();
+    const scorer = createScorer({
+      id: 'called-skill',
+      name: 'called-skill',
+      description: 'Checks that the Skill tool was called',
+    }).generateScore(({ run }) => (extractTrajectory(run.output).steps.some(s => s.name === 'Skill') ? 1 : 0));
+
+    const result = await runEvals({
+      target: agent,
+      data: [{ input: 'Ask the oracle' }],
+      scorers: [scorer],
+    });
+
+    expect(result.scores['called-skill']).toBe(1);
   });
 
   it('rejects mixed Claude resumeData shapes', async () => {
